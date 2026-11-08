@@ -4,6 +4,7 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::types::{Assignments, Person, Receipt};
 
@@ -36,27 +37,58 @@ pub fn slug(input: &str) -> String {
     }
 }
 
+/// Stable content hash of the receipt image, so re-passing the same image
+/// reloads its saved split.
+pub fn image_hash(image: &Path) -> Result<String> {
+    let bytes = std::fs::read(image)?;
+    let digest = Sha256::digest(&bytes);
+    let mut out = String::with_capacity(16);
+    for byte in digest.iter().take(8) {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    Ok(out)
+}
+
 /// /tmp/split-expense/<merchant>/<transaction-date>/
 pub fn state_dir(root: &Path, receipt: &Receipt) -> PathBuf {
     root.join(slug(&receipt.merchant))
         .join(receipt.transaction_date.format("%Y-%m-%d").to_string())
 }
 
-pub fn save(root: &Path, state: &SavedState) -> Result<PathBuf> {
+fn image_index_path(root: &Path, image: &Path) -> Result<PathBuf> {
+    Ok(root.join("by-image").join(image_hash(image)?))
+}
+
+pub fn save(root: &Path, state: &SavedState, image: &Path) -> Result<PathBuf> {
     let dir = state_dir(root, &state.receipt);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let path = dir.join("state.json");
     let json = serde_json::to_string_pretty(state)?;
     std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))?;
+
+    // Index the canonical file by image content so the same photo reloads it.
+    if let Ok(index) = image_index_path(root, image) {
+        if let Some(parent) = index.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&index, path.to_string_lossy().as_bytes());
+    }
     Ok(path)
 }
 
-pub fn load(root: &Path, receipt: &Receipt) -> Result<Option<SavedState>> {
-    let path = state_dir(root, receipt).join("state.json");
-    if !path.exists() {
+pub fn load_by_image(root: &Path, image: &Path) -> Result<Option<SavedState>> {
+    let Ok(index) = image_index_path(root, image) else {
+        return Ok(None);
+    };
+    if !index.exists() {
         return Ok(None);
     }
-    let text = std::fs::read_to_string(&path)?;
+    let target = std::fs::read_to_string(&index)?;
+    let target = PathBuf::from(target.trim());
+    if !target.exists() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&target)?;
     Ok(Some(serde_json::from_str(&text)?))
 }
 

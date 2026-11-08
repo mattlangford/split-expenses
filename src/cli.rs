@@ -9,7 +9,7 @@ pub struct Args {
     pub image: PathBuf,
 
     /// pi model to use for extraction; must support images.
-    #[arg(long, default_value = "google/gemini-3.1-flash-lite-image")]
+    #[arg(long, default_value = "openrouter/google/gemini-2.5-flash")]
     pub model: String,
 
     /// Root directory for saved state.

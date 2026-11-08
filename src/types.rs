@@ -33,7 +33,20 @@ pub struct Receipt {
     pub items: Vec<ReceiptItem>,
     pub subtotal_cents: Option<i64>,
     pub tax_cents: i64,
+    /// Tip/gratuity already printed on the receipt, if any.
+    #[serde(default)]
+    pub tip_cents: Option<i64>,
     pub total_cents: i64,
+    /// Whether the printed total already includes tax.
+    #[serde(default = "default_true")]
+    pub total_includes_tax: bool,
+    /// Whether the printed total already includes a tip/gratuity.
+    #[serde(default)]
+    pub total_includes_tip: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -66,18 +79,6 @@ impl Assignments {
         let set = self.map.entry(item.to_string()).or_default();
         if !set.remove(person) {
             set.insert(person.to_string());
-        }
-        if set.is_empty() {
-            self.map.remove(item);
-        }
-    }
-
-    pub fn set(&mut self, item: &str, person: &str, on: bool) {
-        let set = self.map.entry(item.to_string()).or_default();
-        if on {
-            set.insert(person.to_string());
-        } else {
-            set.remove(person);
         }
         if set.is_empty() {
             self.map.remove(item);

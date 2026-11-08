@@ -1,5 +1,6 @@
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 use chrono::{Local, NaiveDate};
@@ -12,7 +13,7 @@ use crate::types::{Receipt, ReceiptItem};
 const EXTRACTION_PROMPT: &str = r#"You are a precise receipt parser. Look at the receipt image and reply with ONLY a single minified JSON object. Do not include markdown fences or any commentary.
 
 Schema:
-{"merchant":string,"date":"YYYY-MM-DD","currency":"USD","items":[{"name":string,"qty":number,"unit_price":number,"line_total":number}],"subtotal":number,"tax":number,"total":number}
+{"merchant":string,"date":"YYYY-MM-DD","currency":"USD","items":[{"name":string,"qty":number,"unit_price":number,"line_total":number}],"subtotal":number|null,"tax":number,"tip":number|null,"total":number,"total_includes_tax":boolean,"total_includes_tip":boolean}
 
 Rules:
 - All monetary values are decimal dollars, e.g. 12.34 (never include a currency symbol).
@@ -20,17 +21,42 @@ Rules:
 - line_total is the amount printed for the line, after any discounts or comps.
 - Include every purchased line item, including drinks and shared plates.
 - subtotal is the pre-tax total if printed, otherwise null.
-- tax is the tax amount; total is the final amount charged.
+- tax is the tax amount shown on the receipt (0 if none).
+- tip is any tip or gratuity already printed on the receipt, otherwise null.
+- total is the final amount printed on the receipt.
+- total_includes_tax: true if that printed total already includes tax.
+- total_includes_tip: true if that printed total already includes a tip/gratuity.
 - date is the transaction date printed on the receipt, or null if unknown."#;
 
+/// Progress emitted while `pi` reads the receipt.
+#[derive(Debug, Clone)]
+pub enum ExtractProgress {
+    /// A short human-readable stage message.
+    Status(String),
+    /// Assistant text accumulated so far.
+    Partial(String),
+}
+
 /// Run `pi` headlessly to OCR the receipt with a vision model.
-pub fn extract_receipt(pi_bin: &str, model: &str, image: &Path) -> Result<Receipt> {
+///
+/// Uses `--mode json` so events stream back while pi works; `on_progress` is
+/// called with stage updates and partial assistant output. Returns the parsed
+/// receipt once pi exits.
+pub fn extract_receipt(
+    pi_bin: &str,
+    model: &str,
+    image: &Path,
+    mut on_progress: impl FnMut(ExtractProgress),
+) -> Result<Receipt> {
     if !image.exists() {
         bail!("receipt image not found: {}", image.display());
     }
 
-    let output = Command::new(pi_bin)
-        .arg("--print")
+    on_progress(ExtractProgress::Status(format!("launching {pi_bin}")));
+
+    let mut child = Command::new(pi_bin)
+        .arg("--mode")
+        .arg("json")
         .arg("--model")
         .arg(model)
         .arg("--no-session")
@@ -42,19 +68,113 @@ pub fn extract_receipt(pi_bin: &str, model: &str, image: &Path) -> Result<Receip
         .arg("--no-themes")
         .arg(format!("@{}", image.display()))
         .arg(EXTRACTION_PROMPT)
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .with_context(|| format!("failed to run `{pi_bin}` (is pi installed and on PATH?)"))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("pi exited with {}: {}", output.status, stderr.trim());
+    let stdout = child.stdout.take().context("pi stdout unavailable")?;
+    let stderr = child.stderr.take().context("pi stderr unavailable")?;
+    let stderr_handle = std::thread::spawn(move || {
+        let mut buffer = String::new();
+        let mut reader = BufReader::new(stderr);
+        let _ = reader.read_to_string(&mut buffer);
+        buffer
+    });
+
+    let mut assistant = String::new();
+    for line in BufReader::new(stdout).lines() {
+        let line = line.context("reading pi output")?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(event) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let Some(kind) = event.get("type").and_then(Value::as_str) else {
+            continue;
+        };
+        match kind {
+            "agent_start" => on_progress(ExtractProgress::Status("pi agent started".to_string())),
+            "turn_start" => on_progress(ExtractProgress::Status(
+                "model is reading the receipt…".to_string(),
+            )),
+            "message_update" | "message_end" => {
+                let text = assistant_text(&event);
+                if !text.is_empty() && text != assistant {
+                    assistant = text.clone();
+                    on_progress(ExtractProgress::Partial(text));
+                }
+            }
+            "agent_end" => {
+                if let Some(messages) = event.get("messages").and_then(Value::as_array) {
+                    for message in messages.iter().rev() {
+                        if message.get("role").and_then(Value::as_str) == Some("assistant") {
+                            let text = message_text(message);
+                            if !text.is_empty() && text != assistant {
+                                assistant = text.clone();
+                                on_progress(ExtractProgress::Partial(text));
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            "agent_settled" => {
+                on_progress(ExtractProgress::Status("finishing up…".to_string()))
+            }
+            "tool_execution_start" => {
+                on_progress(ExtractProgress::Status("model used a tool".to_string()))
+            }
+            _ => {}
+        }
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let json = extract_json(&stdout)
-        .with_context(|| format!("model did not return a JSON object. Output:\n{}", stdout.trim()))?;
+    let status = child.wait().context("waiting for pi")?;
+    let stderr = stderr_handle.join().unwrap_or_default();
+
+    if assistant.is_empty() {
+        if !status.success() {
+            bail!("pi exited with {}: {}", status, stderr.trim());
+        }
+        bail!("pi returned no response. stderr: {}", stderr.trim());
+    }
+
+    let json = extract_json(&assistant).with_context(|| {
+        format!(
+            "model did not return a JSON object. Output:\n{}",
+            assistant.trim()
+        )
+    })?;
     let value: Value = serde_json::from_str(json).context("model returned invalid JSON")?;
     normalize(&value)
+}
+
+/// Extract the assistant text from a pi JSON event, if it is an assistant message.
+fn assistant_text(event: &Value) -> String {
+    let Some(message) = event.get("message") else {
+        return String::new();
+    };
+    if message.get("role").and_then(Value::as_str) != Some("assistant") {
+        return String::new();
+    }
+    message_text(message)
+}
+
+fn message_text(message: &Value) -> String {
+    let Some(content) = message.get("content").and_then(Value::as_array) else {
+        return String::new();
+    };
+    let mut text = String::new();
+    for part in content {
+        if part.get("type").and_then(Value::as_str) == Some("text") {
+            if let Some(chunk) = part.get("text").and_then(Value::as_str) {
+                text.push_str(chunk);
+            }
+        }
+    }
+    text
 }
 
 fn extract_json(text: &str) -> Option<&str> {
@@ -98,7 +218,10 @@ fn normalize(value: &Value) -> Result<Receipt> {
                 .and_then(value_to_f64)
                 .map(|q| q.round().max(1.0) as u32)
                 .unwrap_or(1);
-            let unit_price_cents = raw.get("unit_price").and_then(|v| value_to_cents(Some(v))).unwrap_or(0);
+            let unit_price_cents = raw
+                .get("unit_price")
+                .and_then(|v| value_to_cents(Some(v)))
+                .unwrap_or(0);
             let line_total_cents = raw
                 .get("line_total")
                 .and_then(|v| value_to_cents(Some(v)))
@@ -118,7 +241,19 @@ fn normalize(value: &Value) -> Result<Receipt> {
 
     let items_sum: i64 = items.iter().map(|i| i.line_total_cents).sum();
     let subtotal_cents = obj.get("subtotal").and_then(|v| value_to_cents(Some(v)));
-    let tax_cents = obj.get("tax").and_then(|v| value_to_cents(Some(v))).unwrap_or(0);
+    let tax_cents = obj
+        .get("tax")
+        .and_then(|v| value_to_cents(Some(v)))
+        .unwrap_or(0);
+    let tip_cents = obj.get("tip").and_then(|v| value_to_cents(Some(v)));
+    let total_includes_tax = obj
+        .get("total_includes_tax")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let total_includes_tip = obj
+        .get("total_includes_tip")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let total_cents = obj
         .get("total")
         .and_then(|v| value_to_cents(Some(v)))
@@ -131,7 +266,10 @@ fn normalize(value: &Value) -> Result<Receipt> {
         items,
         subtotal_cents,
         tax_cents,
+        tip_cents,
         total_cents,
+        total_includes_tax,
+        total_includes_tip,
     })
 }
 
@@ -210,5 +348,20 @@ mod tests {
         let value = json!({"items":[{"name":"x","line_total":10}], "tax": 1});
         let receipt = normalize(&value).unwrap();
         assert_eq!(receipt.total_cents, 1100);
+    }
+
+    #[test]
+    fn reads_assistant_text_from_events() {
+        let event = json!({
+            "type": "message_update",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "{\"merchant\":"},
+                    {"type": "text", "text": "\"X\"}"}
+                ]
+            }
+        });
+        assert_eq!(assistant_text(&event), "{\"merchant\":\"X\"}");
     }
 }

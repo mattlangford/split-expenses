@@ -25,6 +25,7 @@ fn main() -> anyhow::Result<()> {
     let mut app = app::App::new(args);
     let result = run(&mut terminal, &mut app);
     ratatui::restore();
+    app.print_terminal_messages();
     result
 }
 

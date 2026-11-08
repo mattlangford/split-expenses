@@ -2,9 +2,9 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Cell, List, ListItem, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, Wrap};
 
-use crate::app::{App, Mode, Screen, money};
+use crate::app::{App, EditTarget, Mode, Screen, money};
 use crate::money::format_percent_bps;
 use crate::split::SplitResult;
 
@@ -20,8 +20,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     match app.screen {
         Screen::Extracting => render_extracting(frame, chunks[1], app),
         Screen::Receipt => render_receipt(frame, chunks[1], app),
-        Screen::People => render_people(frame, chunks[1], app),
-        Screen::Assign => render_assign(frame, chunks[1], app),
+        Screen::Grid => render_grid(frame, chunks[1], app),
         Screen::Summary => render_summary(frame, chunks[1], app),
     }
     render_footer(frame, chunks[2], app);
@@ -34,14 +33,18 @@ fn render_tabs(frame: &mut Frame, area: Rect, app: &App) {
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
     )];
-    for index in 0..=4 {
+    for index in 0..=3 {
         let screen = Screen::from_index(index);
         let active = app.screen == screen;
-        let style = if active {
+        let style = if app.window_focus && active {
             Style::default()
                 .bg(Color::Cyan)
                 .fg(Color::Black)
                 .add_modifier(Modifier::BOLD)
+        } else if app.window_focus {
+            Style::default().bg(Color::DarkGray).fg(Color::White)
+        } else if active {
+            Style::default().add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::DarkGray)
         };
@@ -54,14 +57,20 @@ fn render_tabs(frame: &mut Frame, area: Rect, app: &App) {
 fn render_extracting(frame: &mut Frame, area: Rect, app: &App) {
     const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     let spinner = FRAMES[app.spinner % FRAMES.len()];
+    let elapsed = app.extract_started.elapsed().as_secs();
     let mut lines = vec![
         Line::from(vec![
             Span::styled(spinner, Style::default().fg(Color::Cyan)),
-            Span::raw("  Parsing receipt with "),
+            Span::raw("  Reading receipt with "),
             Span::styled(app.args.model.clone(), Style::default().fg(Color::Yellow)),
+            Span::styled(format!("   {elapsed}s"), Style::default().fg(Color::DarkGray)),
         ]),
-        Line::from(format!("image: {}", app.args.image.display())),
+        Line::from(Span::styled(
+            format!("image: {}", app.args.image.display()),
+            Style::default().fg(Color::DarkGray),
+        )),
     ];
+
     if let Some(error) = &app.error {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
@@ -72,7 +81,33 @@ fn render_extracting(frame: &mut Frame, area: Rect, app: &App) {
             "press r to retry, q to quit",
             Style::default().fg(Color::Yellow),
         )));
+    } else {
+        if !app.extract_status.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                app.extract_status.clone(),
+                Style::default().fg(Color::Cyan),
+            )));
+        }
+        if app.extract_partial.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "waiting for pi… (large images and reasoning models can take 10–30s)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "model output so far:",
+                Style::default().fg(Color::DarkGray),
+            )));
+            lines.push(Line::from(Span::styled(
+                tail_chars(&app.extract_partial, 600),
+                Style::default().fg(Color::Gray),
+            )));
+        }
     }
+
     frame.render_widget(
         Paragraph::new(lines)
             .block(Block::bordered().title(" Extract "))
@@ -85,7 +120,7 @@ fn render_receipt(frame: &mut Frame, area: Rect, app: &App) {
     let Some(receipt) = &app.receipt else {
         return;
     };
-    let chunks = Layout::vertical([Constraint::Min(4), Constraint::Length(8)]).split(area);
+    let chunks = Layout::vertical([Constraint::Min(4), Constraint::Length(10)]).split(area);
 
     let header = Row::new(vec![
         Cell::from("Item"),
@@ -100,18 +135,44 @@ fn render_receipt(frame: &mut Frame, area: Rect, app: &App) {
         .iter()
         .enumerate()
         .map(|(index, item)| {
-            let style = if index == app.row {
+            let row_selected = index == app.row && !app.window_focus;
+            let cell = |col: usize, text: String| {
+                let target = match col {
+                    0 => EditTarget::ItemName(index),
+                    1 => EditTarget::ItemQty(index),
+                    2 => EditTarget::ItemUnitPrice(index),
+                    _ => EditTarget::ItemLineTotal(index),
+                };
+                let editing = app.edit.as_ref() == Some(&target);
+                let display = if editing {
+                    format!("{}▏", app.input)
+                } else {
+                    text
+                };
+                let style = if editing {
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                } else if row_selected && app.col == col {
+                    Style::default()
+                        .bg(Color::Cyan)
+                        .fg(Color::Black)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                Cell::from(Span::styled(display, style))
+            };
+            let row_style = if row_selected {
                 Style::default().bg(Color::DarkGray).fg(Color::White)
             } else {
                 Style::default()
             };
             Row::new(vec![
-                Cell::from(item.name.clone()),
-                Cell::from(item.qty.to_string()),
-                Cell::from(money(item.unit_price_cents)),
-                Cell::from(money(item.line_total_cents)),
+                cell(0, item.name.clone()),
+                cell(1, item.qty.to_string()),
+                cell(2, money(item.unit_price_cents)),
+                cell(3, money(item.line_total_cents)),
             ])
-            .style(style)
+            .style(row_style)
         })
         .collect();
 
@@ -138,22 +199,32 @@ fn render_receipt(frame: &mut Frame, area: Rect, app: &App) {
             money(receipt.tax_cents),
         )),
         Line::from(format!(
-            "Items sum: {}    Subtotal: {}    Printed total: {}",
-            money(items_sum),
-            receipt
-                .subtotal_cents
-                .map(money)
-                .unwrap_or_else(|| "—".to_string()),
+            "Receipt total {}   (tax {}, tip {})",
             money(receipt.total_cents),
+            if receipt.total_includes_tax {
+                "included"
+            } else {
+                "excluded"
+            },
+            if receipt.total_includes_tip {
+                "included"
+            } else {
+                "excluded"
+            },
         )),
     ];
+    if let Some(tip) = receipt.tip_cents {
+        lines.push(Line::from(format!("Printed tip/gratuity: {}", money(tip))));
+    }
+    lines.push(Line::from(format!(
+        "Items sum: {}    Subtotal: {}",
+        money(items_sum),
+        receipt
+            .subtotal_cents
+            .map(money)
+            .unwrap_or_else(|| "—".to_string()),
+    )));
     if let Some(split) = app.split_result() {
-        lines.push(Line::from(format!(
-            "Assigned: {}    Tip amount: {}    Computed total: {}",
-            money(split.assigned_sum_cents),
-            money(split.tip_cents),
-            money(split.computed_total_cents),
-        )));
         lines.extend(recon_lines(&split));
     }
     lines.push(Line::from(Span::styled(
@@ -168,79 +239,119 @@ fn render_receipt(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-fn render_people(frame: &mut Frame, area: Rect, app: &App) {
-    let items: Vec<ListItem> = app
-        .people
-        .iter()
-        .enumerate()
-        .map(|(index, person)| {
-            let style = if index == app.row {
-                Style::default().bg(Color::DarkGray).fg(Color::White)
-            } else {
-                Style::default()
-            };
-            ListItem::new(Line::from(person.name.clone())).style(style)
-        })
-        .collect();
-    let title = if app.people.is_empty() {
-        " People — press a to add "
-    } else {
-        " People "
-    };
-    frame.render_widget(
-        List::new(items).block(Block::bordered().title(title)),
-        area,
-    );
-}
-
-fn render_assign(frame: &mut Frame, area: Rect, app: &App) {
+fn render_grid(frame: &mut Frame, area: Rect, app: &App) {
     let Some(receipt) = &app.receipt else {
         return;
     };
-    let chunks = Layout::vertical([Constraint::Min(4), Constraint::Length(8)]).split(area);
+    let people = &app.people;
+    let active_cursor = !app.window_focus;
+    let on_assignment = active_cursor
+        && app.row >= 1
+        && app.row <= receipt.items.len()
+        && app.col >= 1
+        && app.col <= people.len();
+    let chunks = Layout::vertical([Constraint::Min(4), Constraint::Length(10)]).split(area);
 
-    let mut widths = vec![Constraint::Min(16)];
-    for _ in &app.people {
-        widths.push(Constraint::Length(9));
+    let mut widths = vec![Constraint::Min(20)];
+    for _ in people {
+        widths.push(Constraint::Length(10));
     }
-    widths.push(Constraint::Length(10));
+    widths.push(Constraint::Length(12));
 
-    let mut header_cells = vec![Cell::from("Item")];
-    for person in &app.people {
-        header_cells.push(Cell::from(person.name.clone()));
+    let mut rows: Vec<Row> = Vec::new();
+
+    // Header row: people columns plus an "add person" column.
+    let item_header_selected = active_cursor && app.row == 0 && app.col == 0;
+    let mut header = vec![grid_cell(
+        "Item".to_string(),
+        item_header_selected,
+        false,
+        true,
+        false,
+    )];
+    for (index, person) in people.iter().enumerate() {
+        let selected = active_cursor && app.row == 0 && app.col == index + 1;
+        let editing = matches!(app.edit, Some(EditTarget::GridPersonName(i)) if i == index);
+        let crosshair = on_assignment && app.col == index + 1;
+        let text = if editing {
+            format!("{}▏", app.input)
+        } else {
+            person.name.clone()
+        };
+        header.push(grid_cell(text, selected, editing, true, crosshair));
     }
-    header_cells.push(Cell::from("Line"));
-    let header = Row::new(header_cells).style(Style::default().add_modifier(Modifier::BOLD));
+    let add_selected = active_cursor && app.row == 0 && app.col == people.len() + 1;
+    let add_editing = matches!(app.edit, Some(EditTarget::GridNewPerson));
+    let add_text = if add_editing {
+        format!("{}▏", app.input)
+    } else {
+        "+ person".to_string()
+    };
+    header.push(grid_cell(add_text, add_selected, add_editing, true, false));
+    rows.push(Row::new(header));
 
-    let mut rows = Vec::new();
+    // One row per item.
     for (row_index, item) in receipt.items.iter().enumerate() {
-        let mut cells = vec![Cell::from(item.name.clone())];
-        for (col_index, person) in app.people.iter().enumerate() {
+        let mut cells = Vec::new();
+        let name_selected = active_cursor && app.row == row_index + 1 && app.col == 0;
+        let name_editing = matches!(app.edit, Some(EditTarget::GridItemName(i)) if i == row_index);
+        let crosshair = on_assignment && app.row == row_index + 1;
+        let name_text = if name_editing {
+            format!("{}▏", app.input)
+        } else {
+            format!("{}  {}", item.name, money(item.line_total_cents))
+        };
+        cells.push(grid_cell(name_text, name_selected, name_editing, false, crosshair));
+
+        for (col_index, person) in people.iter().enumerate() {
             let assigned = app.assignments.is_assigned(&item.id, &person.id);
-            let mark = if assigned { "[x]" } else { "[ ]" };
-            let selected = row_index == app.row && col_index == app.col;
+            let selected = active_cursor && app.row == row_index + 1 && app.col == col_index + 1;
+            let mark = if assigned { " [x] " } else { " [ ] " };
             let style = if selected {
                 Style::default()
                     .bg(Color::Cyan)
                     .fg(Color::Black)
                     .add_modifier(Modifier::BOLD)
+            } else if assigned {
+                Style::default().fg(Color::Green)
             } else {
                 Style::default()
             };
-            cells.push(Cell::from(Span::styled(mark, style)));
+            cells.push(Cell::from(Span::styled(mark.to_string(), style)));
         }
-        cells.push(Cell::from(money(item.line_total_cents)));
+        cells.push(empty_cell(
+            active_cursor && app.row == row_index + 1 && app.col == people.len() + 1,
+            false,
+        ));
         rows.push(Row::new(cells));
     }
 
-    let title = if app.people.is_empty() {
-        " Assign — add people first (people screen) "
+    // Add-item row.
+    let add_row_selected = active_cursor && app.row == receipt.items.len() + 1 && app.col == 0;
+    let add_row_editing = matches!(app.edit, Some(EditTarget::GridNewItem));
+    let add_row_text = if add_row_editing {
+        format!("{}▏", app.input)
     } else {
-        " Assign (space toggle · A all · o solo · c clear) "
+        "+ item".to_string()
     };
+    let add_row = receipt.items.len() + 1;
+    let mut add_cells = vec![grid_cell(
+        add_row_text,
+        add_row_selected,
+        add_row_editing,
+        false,
+        false,
+    )];
+    for col_index in 1..=people.len() + 1 {
+        add_cells.push(empty_cell(
+            active_cursor && app.row == add_row && app.col == col_index,
+            false,
+        ));
+    }
+    rows.push(Row::new(add_cells));
+
     let table = Table::new(rows, widths)
-        .header(header)
-        .block(Block::bordered().title(title));
+        .block(Block::bordered().title(" Grid (hjkl move · Enter toggle/edit · type to add) "));
     frame.render_widget(table, chunks[0]);
 
     let mut lines = Vec::new();
@@ -257,6 +368,10 @@ fn render_assign(frame: &mut Frame, area: Rect, app: &App) {
         }
         lines.push(Line::from(""));
         lines.extend(recon_lines(split));
+    } else {
+        lines.push(Line::from(
+            "Move to the + person column and press Enter to type names.",
+        ));
     }
     frame.render_widget(
         Paragraph::new(lines)
@@ -270,7 +385,7 @@ fn render_summary(frame: &mut Frame, area: Rect, app: &App) {
     let Some(split) = app.split_result() else {
         return;
     };
-    let chunks = Layout::vertical([Constraint::Min(4), Constraint::Length(9)]).split(area);
+    let chunks = Layout::vertical([Constraint::Min(4), Constraint::Length(10)]).split(area);
 
     let header = Row::new(vec![
         Cell::from("Person"),
@@ -322,7 +437,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     let line = if app.mode == Mode::Insert {
         Line::from(vec![
             Span::styled(
-                " EDIT ",
+                format!(" {} ", app.edit_prompt()),
                 Style::default()
                     .bg(Color::Yellow)
                     .fg(Color::Black)
@@ -336,16 +451,19 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
             ),
         ])
     } else {
-        let hints = match app.screen {
-            Screen::Extracting => "r retry · q quit",
-            Screen::Receipt => {
-                "j/k move · i name · e price · u qty · L line · a add · d delete · m/D/t/S/T/% fields · s save · h/l screens · q quit"
+        let hints = if app.window_focus {
+            "h/l switch window · j/Esc back · q quit"
+        } else {
+            match app.screen {
+                Screen::Extracting => "r retry · q quit",
+                Screen::Receipt => {
+                    "hjkl move · Enter edit · a add · d delete · m merchant · D date · t tax · S subtotal · T total · % tip · s save · k↑: windows · q quit"
+                }
+                Screen::Grid => {
+                    "hjkl move · Enter toggle/edit · Space toggle · d delete · s save · k↑: windows · q quit"
+                }
+                Screen::Summary => "y copy · s save · k↑: windows · q quit",
             }
-            Screen::People => "j/k move · a add · i rename · d delete · h/l screens · q quit",
-            Screen::Assign => {
-                "hjkl move · space toggle · A all · o solo · c clear · s save · n/p screens · q quit"
-            }
-            Screen::Summary => "y copy · s save · h/l screens · q quit",
         };
         let status = if app.status.is_empty() {
             String::new()
@@ -362,33 +480,102 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
 
 fn recon_lines(split: &SplitResult) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    let total_matches = split.computed_total_cents == split.receipt_total_cents;
+    let basis = match (split.receipt_includes_tax, split.receipt_includes_tip) {
+        (true, true) => "incl. tax & tip",
+        (true, false) => "incl. tax, excl. tip",
+        (false, true) => "excl. tax, incl. tip",
+        (false, false) => "excl. tax & tip",
+    };
+    lines.push(Line::from(format!(
+        "receipt total {} ({basis})",
+        money(split.receipt_total_cents),
+    )));
+    let delta = split.comparable_cents - split.receipt_total_cents;
+    let (status, status_style) = if split.total_matches {
+        ("✓ match".to_string(), Style::default().fg(Color::Green))
+    } else {
+        (
+            format!(
+                "✗ mismatch ({}{})",
+                if delta >= 0 { "+" } else { "-" },
+                money(delta.abs())
+            ),
+            Style::default().fg(Color::Red),
+        )
+    };
     lines.push(Line::from(vec![
-        Span::raw("computed total "),
-        Span::raw(money(split.computed_total_cents)),
-        Span::raw("  vs receipt "),
-        Span::raw(money(split.receipt_total_cents)),
-        Span::raw("  "),
-        Span::styled(
-            if total_matches { "✓ match" } else { "✗ mismatch" },
-            if total_matches {
-                Style::default().fg(Color::Green)
-            } else {
-                Style::default().fg(Color::Red)
-            },
-        ),
+        Span::raw(format!(
+            "receipt comparison: computed {} vs receipt {}  ",
+            money(split.comparable_cents),
+            money(split.receipt_total_cents),
+        )),
+        Span::styled(status, status_style),
     ]));
+    lines.push(Line::from(format!(
+        "pre-tip {} (items {} + tax {})   + tip {}   = {} to split",
+        money(split.computed_pretip_cents),
+        money(split.items_sum_cents),
+        money(split.tax_cents),
+        money(split.tip_cents),
+        money(split.computed_total_cents),
+    )));
     if !split.unassigned.is_empty() {
         lines.push(Line::from(Span::styled(
             format!("{} item(s) not assigned to anyone", split.unassigned.len()),
             Style::default().fg(Color::Yellow),
         )));
     }
-    lines.push(Line::from(format!(
-        "tax {}   tip {}   items {}",
-        money(split.tax_cents),
-        money(split.tip_cents),
-        money(split.items_sum_cents),
-    )));
     lines
+}
+
+fn empty_cell(selected: bool, crosshair: bool) -> Cell<'static> {
+    let style = if selected {
+        Style::default()
+            .bg(Color::Cyan)
+            .fg(Color::Black)
+            .add_modifier(Modifier::BOLD)
+    } else if crosshair {
+        Style::default()
+            .bg(Color::Blue)
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    Cell::from(Span::styled(" ", style))
+}
+
+fn grid_cell(
+    text: String,
+    selected: bool,
+    editing: bool,
+    bold: bool,
+    crosshair: bool,
+) -> Cell<'static> {
+    let style = if editing {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else if selected {
+        Style::default()
+            .bg(Color::Cyan)
+            .fg(Color::Black)
+            .add_modifier(Modifier::BOLD)
+    } else if crosshair {
+        Style::default()
+            .bg(Color::Blue)
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else if bold {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    Cell::from(Span::styled(text, style))
+}
+
+fn tail_chars(input: &str, max: usize) -> String {
+    let mut chars: Vec<char> = input.chars().rev().take(max).collect();
+    chars.reverse();
+    let mut out = String::from("…");
+    out.extend(chars);
+    out
 }
