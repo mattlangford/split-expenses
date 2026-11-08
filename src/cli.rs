@@ -1,0 +1,22 @@
+use std::path::PathBuf;
+
+use clap::Parser;
+
+#[derive(Parser, Debug, Clone)]
+#[command(name = "split", version, about = "Split a restaurant bill from a receipt image")]
+pub struct Args {
+    /// Path to the receipt image.
+    pub image: PathBuf,
+
+    /// pi model to use for extraction; must support images.
+    #[arg(long, default_value = "google/gemini-3.1-flash-lite-image")]
+    pub model: String,
+
+    /// Root directory for saved state.
+    #[arg(long, default_value = "/tmp/split-expense")]
+    pub state_dir: PathBuf,
+
+    /// pi executable to shell out to.
+    #[arg(long, default_value = "pi")]
+    pub pi_bin: String,
+}
