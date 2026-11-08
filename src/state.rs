@@ -1,6 +1,4 @@
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -90,31 +88,4 @@ pub fn load_by_image(root: &Path, image: &Path) -> Result<Option<SavedState>> {
     }
     let text = std::fs::read_to_string(&target)?;
     Ok(Some(serde_json::from_str(&text)?))
-}
-
-/// Copy text to the system clipboard, falling back to a temp file.
-pub fn copy_to_clipboard(text: &str) -> Result<()> {
-    const CANDIDATES: [(&str, &[&str]); 3] = [
-        ("pbcopy", &[]),
-        ("wl-copy", &[]),
-        ("xclip", &["-selection", "clipboard"]),
-    ];
-    for (program, args) in CANDIDATES {
-        let spawned = Command::new(program)
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-        if let Ok(mut child) = spawned {
-            if let Some(stdin) = child.stdin.as_mut() {
-                let _ = stdin.write_all(text.as_bytes());
-            }
-            let _ = child.wait();
-            return Ok(());
-        }
-    }
-    let path = std::env::temp_dir().join("split-expense-summary.txt");
-    std::fs::write(&path, text)?;
-    anyhow::bail!("no clipboard tool found; wrote summary to {}", path.display())
 }

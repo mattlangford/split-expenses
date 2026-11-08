@@ -35,8 +35,8 @@ src/money.rs  cents parse/format, parse/format tip basis points, allocate()
 src/split.rs  compute_split(): per-person allocation + reconciliation
 src/pi.rs     extract_receipt(): shell out to pi (--mode json), stream progress, normalize JSON -> Receipt
 src/state.rs  save/load /tmp/.../state.json keyed by image hash, slug, clipboard
-src/app.rs    App state machine, spreadsheet grid, vim Normal/Insert key handling
-src/ui.rs     ratatui rendering for all screens
+src/app.rs    App state machine, single Grid view, vim Normal/Insert key handling
+src/ui.rs     ratatui rendering: grid, details, match/allocation banners
 ```
 
 Dependency direction: `app`/`ui`/`pi`/`state` depend on `types`/`money`/`split`.
@@ -67,21 +67,18 @@ Keep the math modules free of I/O and TUI types.
   the same image reloads the saved split at startup and skips OCR
   (`state::load_by_image`); the canonical file still lives under
   `/tmp/split-expense/<merchant>/<date>/` with a pointer in `by-image/<hash>`.
-- Screens are Extract / Receipt / Grid / Summary. The Grid is a spreadsheet
-  (items × people): `hjkl` moves between cells, `Enter` toggles the focused
-  assignment or edits the focused name, and the trailing `+ person` column / `+ item`
-  row open inline text entry. `App::adding_people` and `adding_items` keep that
-  entry going across Enters; `begin_edit` clears them and `App::edit_prompt` labels
-  the footer.
-- The Receipt item table is cell-editable too: `hjkl` moves across name/qty/total
-  and `Enter` edits the focused cell inline (receipt-level fields use the footer keys
-  `m`/`D`/`t`/`S`/`T`/`%`). Unit price is not shown or edited.
-- Pressing up (`k`) at the top row of Grid/Receipt moves the cursor into the window
-  bar (`App::window_focus`): the tabs get the blue highlight and `h`/`l` switch
-  screens via `switch_screen`, while `j`/`Esc` returns. Outside window focus the tabs
-  are not highlighted and `h`/`l` move within the current screen. Screen switching
-  happens only through `switch_screen` from window focus; do not add other next/prev
-  screen shortcuts.
+- There is a single Grid view (screens are only `Extracting` and `Grid`). It is a
+  spreadsheet: item name/qty/total columns, one column per person, then a `+ person`
+  column, plus a `+ item` row. `hjkl` moves between cells; `Enter` toggles an
+  item×person assignment or edits the focused cell inline; the trailing `+ person`
+  column / `+ item` row open inline text entry. `App::adding_people` and
+  `adding_items` keep that entry going across Enters; `begin_edit` clears them and
+  `App::edit_prompt` labels the footer. Receipt-level fields (`m`/`D`/`t`/`S`/`T`/`%`)
+  use the footer input. Unit price is stored but not shown or edited.
+- The bottom of the grid shows two full-width coloured bars: a receipt check
+  (`SplitResult::total_matches`, green/red) and an allocation check (sum of each
+  person's owed vs `computed_total_cents`, green or yellow with unassigned items).
+  Keep those two error conditions distinct.
 - Receipt composition comes from the model: `total_includes_tax`,
   `total_includes_tip`, and an optional printed `tip_cents`. Item prices are assumed
   to exclude tax. `split::compute_split` uses these so reconciliation compares the

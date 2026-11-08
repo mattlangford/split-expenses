@@ -4,7 +4,7 @@ Terminal UI for splitting a restaurant bill from a photo of the receipt. It shel
 out to [`pi`](https://github.com/earendil-works/pi) with a vision model to read the
 receipt, then lets you add people and tick off who shared each item.
 
-Flow: **Extract → Receipt → Grid → Summary**
+Flow: **Extract → Grid** (a single view)
 
 ## Build & run
 
@@ -26,21 +26,20 @@ Requires `pi` on your `PATH` configured with an image-capable model
 
 ## Keys (vim-style: Normal + Insert modes)
 
-Insert mode is entered with `i`/`a`/`e` or `Enter`; `Enter` commits, `Esc` cancels.
-Normal mode navigates with `h` `j` `k` `l` (arrows also work).
+Insert mode is entered with `Enter` (or `a` for a person); `Enter` commits, `Esc` cancels.
+Normal mode navigates with `h` `j` `k` `l` (arrows also work). There is a single view.
 
-| Screen | Keys |
-|--------|------|
-| Any | `s` save · `q` save & quit · `Ctrl+C` save & quit |
-| Extract | `r` retry on error |
-| Receipt | `hjkl` move cell · `Enter` edit the focused field (name/qty/total) · `g`/`G` top/bottom · `a` add · `d` delete · `m` merchant · `D` date · `t` tax · `S` subtotal · `T` total · `%` tip |
-| Grid | `hjkl` move between cells · `Enter` toggles the assignment or edits the focused name · typing on `+ person` / `+ item` enters names inline (Enter for next, Esc done) · `d` deletes the row/column |
-| Summary | `y` copy |
-| Windows | `k`/`↑` at the top row enters the window bar; only there do `h`/`l` switch screens (tabs highlight) and `j`/`Esc` returns |
-
-Screens switch **only** from the window bar, and the tabs only highlight while it is
-focused. At the top of the Grid or Receipt screen, pressing `k` again moves the cursor
-into the window bar (on Summary, `k` enters it directly).
+| Keys | Action |
+|------|--------|
+| `hjkl` / arrows | move across cells: item name, qty, total, each person, `+ person` |
+| `Enter` | on an item×person cell, toggle that person's share; otherwise edit the focused cell inline |
+| `Space` | toggle the focused assignment |
+| typing on `+ person` / `+ item` | add several people/items in a row (Enter for next, Esc done) |
+| `a` | add a person |
+| `d` | delete the focused item (its name cell) or person (its header) |
+| `m` `D` `t` `S` `T` `%` | edit merchant, date, tax, subtotal, receipt total, tip % |
+| `s` / `q` / `Ctrl+C` | save / save & quit / quit |
+| `r` | retry extraction after an error |
 
 ## Splitting rules
 
@@ -54,8 +53,10 @@ into the window bar (on Summary, `k` enters it directly).
   are assumed to exclude tax.
 - Money is integer cents; allocations use the largest-remainder method so
   per-person amounts sum exactly to the item/tax/tip totals.
-- Grid/Summary show a reconciliation line (computed pre-tip vs the amount the
-  receipt total implies) and flag unassigned items.
+- Two checks run at the bottom of the grid: a **receipt check** (green when parsed
+  items+tax tie to the parsed total, red with the delta when they don't) and an
+  **allocation check** (green when everyone's shares sum to items+tax+tip, yellow
+  showing unassigned items and the shortfall when they don't).
 
 ## State
 
@@ -67,9 +68,9 @@ into the window bar (on Summary, `k` enters it directly).
 Passing the **same image** again reloads its saved receipt, people, assignments,
 and tip automatically (no re-OCR).
 
-Errors hit during the session (extraction failure, save failure, clipboard
-failure) are printed to the terminal after the UI exits, so they stay in your
-scrollback once you quit with `q` or `Ctrl+C`.
+Errors hit during the session (extraction failure, save failure) are printed to the
+terminal after the UI exits, so they stay in your scrollback once you quit with `q`
+or `Ctrl+C`.
 
 ## Extraction
 
