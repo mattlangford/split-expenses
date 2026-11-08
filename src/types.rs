@@ -52,6 +52,20 @@ fn default_true() -> bool {
     true
 }
 
+impl Receipt {
+    /// Sum of every item's line total.
+    pub fn items_sum_cents(&self) -> i64 {
+        self.items.iter().map(|item| item.line_total_cents).sum()
+    }
+
+    /// The amount tax/tip rates apply to: the printed subtotal, falling back to
+    /// the sum of the item line totals.
+    pub fn subtotal_or_items_cents(&self) -> i64 {
+        self.subtotal_cents
+            .unwrap_or_else(|| self.items_sum_cents())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Person {
     pub id: String,

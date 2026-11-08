@@ -33,12 +33,11 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut app::App) -> anyhow::R
     while !app.quit {
         app.tick();
         terminal.draw(|frame| ui::render(frame, app))?;
-        if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    app.handle_key(key);
-                }
-            }
+        if event::poll(Duration::from_millis(100))?
+            && let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            app.handle_key(key);
         }
     }
     Ok(())

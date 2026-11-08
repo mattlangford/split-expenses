@@ -61,7 +61,8 @@ Keep the math modules free of I/O and TUI types.
 - The TUI has a Normal/Insert mode model: `app.rs` handles keys, `ui.rs` only
   renders. Navigation is **arrow keys only**; typing on the highlighted cell/field
   enters Insert mode with the typed character replacing the value.
-- Save is `Ctrl+S`; quit is `Ctrl+C` (saves state first).
+- State autosaves after every change (`commit_edit`, toggles, deletes, undo,
+  extraction); quit is `Ctrl+C` (saves state first).
 - Errors are shown in the TUI **and** replayed to stderr after the terminal is
   restored, so they survive exit. Route failure paths through `App::record_error`
   (or `App::error` for extraction) rather than only setting `status`; `main`
@@ -95,12 +96,14 @@ Keep the math modules free of I/O and TUI types.
   check (`SplitResult::owed_matches`, sum of each person's owed vs
   `expected_charge_cents` = receipt total plus any tax/tip it excludes). Keep those
   two error conditions distinct.
-- Receipt composition comes from the model: `total_includes_tax`,
-  `total_includes_tip`, and optional printed `tax_cents`/`tax_bps`/`tip_cents`. Item
-  prices are assumed to exclude tax. `pi.rs` derives `tax_cents` from
-  `total − subtotal` (minus any included tip) when the receipt does not itemise tax,
-  and sets `tax_bps` from it. The receipt check compares the **parsed** items +
-  parsed tax/tip to the parsed total (`SplitResult::comparable_cents`), while the
+- The model only **transcribes values printed on the receipt** (merchant, date,
+  currency, item lines, subtotal, tax, tip, total). Composition is inferred in
+  Rust: `pi::infer_inclusions` decides whether the printed total already includes
+  tax/tip by testing which printed components reconcile with it. Item prices are
+  assumed to exclude tax. `pi.rs` derives `tax_cents` from `total − subtotal`
+  (minus any included tip) when the receipt does not itemise tax, and sets
+  `tax_bps` via `money::rate_bps`. The receipt check compares the **parsed** items
+  + parsed tax/tip to the parsed total (`SplitResult::comparable_cents`), while the
   allocation uses the chosen rates. Keep that logic in `split.rs`.
 
 ## Testing

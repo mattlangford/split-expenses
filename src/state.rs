@@ -57,7 +57,7 @@ fn image_index_path(root: &Path, image: &Path) -> Result<PathBuf> {
     Ok(root.join("by-image").join(image_hash(image)?))
 }
 
-pub fn save(root: &Path, state: &SavedState, image: &Path) -> Result<PathBuf> {
+pub fn save(root: &Path, state: &SavedState, image: &Path) -> Result<()> {
     let dir = state_dir(root, &state.receipt);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let path = dir.join("state.json");
@@ -71,7 +71,7 @@ pub fn save(root: &Path, state: &SavedState, image: &Path) -> Result<PathBuf> {
         }
         let _ = std::fs::write(&index, path.to_string_lossy().as_bytes());
     }
-    Ok(path)
+    Ok(())
 }
 
 pub fn load_by_image(root: &Path, image: &Path) -> Result<Option<SavedState>> {

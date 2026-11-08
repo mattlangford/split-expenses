@@ -41,7 +41,10 @@ fn render_extracting(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled(spinner, Style::default().fg(Color::Cyan)),
             Span::raw("  Reading receipt with "),
             Span::styled(app.args.model.clone(), Style::default().fg(Color::Yellow)),
-            Span::styled(format!("   {elapsed}s"), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("   {elapsed}s"),
+                Style::default().fg(Color::DarkGray),
+            ),
         ]),
         Line::from(Span::styled(
             format!("image: {}", app.args.image.display()),
@@ -144,20 +147,12 @@ fn render_grid(frame: &mut Frame, area: Rect, app: &App) {
         let selected = grid_focus && app.row == 0 && app.col == ITEM_COLS + index;
         let editing = matches!(app.edit, Some(EditTarget::GridPersonName(i)) if i == index);
         let crosshair = on_item_row && app.col == ITEM_COLS + index;
-        let text = if editing {
-            format!("{}▏", app.input)
-        } else {
-            person.name.clone()
-        };
+        let text = edit_text(editing, &app.input, person.name.clone());
         header.push(grid_cell(text, selected, editing, true, crosshair));
     }
     let add_selected = grid_focus && app.row == 0 && app.col == ITEM_COLS + people.len();
     let add_editing = matches!(app.edit, Some(EditTarget::GridNewPerson));
-    let add_text = if add_editing {
-        format!("{}▏", app.input)
-    } else {
-        "+ person".to_string()
-    };
+    let add_text = edit_text(add_editing, &app.input, "+ person");
     header.push(grid_cell(
         add_text,
         add_selected,
@@ -176,21 +171,9 @@ fn render_grid(frame: &mut Frame, area: Rect, app: &App) {
             matches!(app.edit, Some(EditTarget::GridItemTotal(i)) if i == row_index);
         let crosshair = on_item_row && app.row == row_index + 1;
 
-        let name_text = if name_editing {
-            format!("{}▏", app.input)
-        } else {
-            item.name.clone()
-        };
-        let qty_text = if qty_editing {
-            format!("{}▏", app.input)
-        } else {
-            item.qty.to_string()
-        };
-        let total_text = if total_editing {
-            format!("{}▏", app.input)
-        } else {
-            money(item.line_total_cents)
-        };
+        let name_text = edit_text(name_editing, &app.input, item.name.clone());
+        let qty_text = edit_text(qty_editing, &app.input, item.qty.to_string());
+        let total_text = edit_text(total_editing, &app.input, money(item.line_total_cents));
 
         let mut cells = vec![
             grid_cell(
@@ -221,10 +204,7 @@ fn render_grid(frame: &mut Frame, area: Rect, app: &App) {
             let selected = row_selected && app.col == ITEM_COLS + col_index;
             let mark = if assigned { " [x] " } else { " [ ] " };
             let style = if selected {
-                Style::default()
-                    .bg(Color::Cyan)
-                    .fg(Color::Black)
-                    .add_modifier(Modifier::BOLD)
+                focus_style(true, false)
             } else if assigned {
                 Style::default().fg(Color::Green)
             } else {
@@ -243,11 +223,7 @@ fn render_grid(frame: &mut Frame, area: Rect, app: &App) {
     let add_row = receipt.items.len() + 1;
     let add_row_selected = grid_focus && app.row == add_row;
     let add_row_editing = matches!(app.edit, Some(EditTarget::GridNewItem));
-    let add_row_text = if add_row_editing {
-        format!("{}▏", app.input)
-    } else {
-        "+ item".to_string()
-    };
+    let add_row_text = edit_text(add_row_editing, &app.input, "+ item");
     let mut add_cells = vec![
         grid_cell(
             add_row_text,
@@ -274,11 +250,11 @@ fn render_grid(frame: &mut Frame, area: Rect, app: &App) {
 
     let tax_selected = grid_focus && app.row == tax_row;
     let tax_editing = matches!(app.edit, Some(EditTarget::TaxPercent));
-    let tax_text = if tax_editing {
-        format!("{}▏", app.input)
-    } else {
-        format!("{}%", format_percent_bps(receipt.tax_bps))
-    };
+    let tax_text = edit_text(
+        tax_editing,
+        &app.input,
+        format!("{}%", format_percent_bps(receipt.tax_bps)),
+    );
     let mut tax_cells = vec![
         grid_cell("Tax".to_string(), tax_selected, false, true, false),
         empty_cell(false, false),
@@ -291,11 +267,11 @@ fn render_grid(frame: &mut Frame, area: Rect, app: &App) {
 
     let tip_selected = grid_focus && app.row == tip_row;
     let tip_editing = matches!(app.edit, Some(EditTarget::TipPercent));
-    let tip_text = if tip_editing {
-        format!("{}▏", app.input)
-    } else {
-        format!("{}%", format_percent_bps(app.tip_bps))
-    };
+    let tip_text = edit_text(
+        tip_editing,
+        &app.input,
+        format!("{}%", format_percent_bps(app.tip_bps)),
+    );
     let mut tip_cells = vec![
         grid_cell("Tip".to_string(), tip_selected, false, true, false),
         empty_cell(false, false),
@@ -363,7 +339,9 @@ fn render_details(frame: &mut Frame, area: Rect, app: &App) {
             format!("{label:<14}{value}")
         };
         let style = if editing {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
         } else if focused {
             Style::default()
                 .bg(Color::Cyan)
@@ -375,8 +353,7 @@ fn render_details(frame: &mut Frame, area: Rect, app: &App) {
         Line::from(Span::styled(text, style))
     };
 
-    let items_sum: i64 = receipt.items.iter().map(|item| item.line_total_cents).sum();
-    let subtotal = receipt.subtotal_cents.unwrap_or(items_sum);
+    let subtotal = receipt.subtotal_or_items_cents();
     let lines = vec![
         field(
             0,
@@ -397,7 +374,7 @@ fn render_details(frame: &mut Frame, area: Rect, app: &App) {
             receipt
                 .subtotal_cents
                 .map(money)
-                .unwrap_or_else(|| money(items_sum)),
+                .unwrap_or_else(|| money(subtotal)),
         ),
         field(
             3,
@@ -546,7 +523,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         let hints = match app.screen {
             Screen::Extracting => "r retry · Ctrl+C quit",
             Screen::Grid => {
-                "? help · arrows move · type to edit · Space toggle · d delete · u undo · Ctrl+S save · Ctrl+C quit"
+                "? help · arrows move · type to edit · Space toggle · d delete · u undo · Ctrl+C quit"
             }
         };
         let status = if app.status.is_empty() {
@@ -599,7 +576,8 @@ fn render_confirm(frame: &mut Frame, app: &App) {
             .map(|person| format!("person \"{}\"", person.name))
             .unwrap_or_else(|| "this person".to_string()),
     };
-    let text = format!("Delete {label}?\n\nThis removes it from the split.\n\ny = yes    n / Esc = no");
+    let text =
+        format!("Delete {label}?\n\nThis removes it from the split.\n\ny = yes    n / Esc = no");
 
     let screen = frame.area();
     let width = screen.width.saturating_sub(4).clamp(28, 60);
@@ -620,16 +598,9 @@ fn render_confirm(frame: &mut Frame, app: &App) {
     );
 }
 
-fn grid_cell(
-    text: String,
-    selected: bool,
-    editing: bool,
-    bold: bool,
-    crosshair: bool,
-) -> Cell<'static> {
-    let style = if editing {
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-    } else if selected {
+/// Style for the cell under the cursor and the row it crosses.
+fn focus_style(selected: bool, crosshair: bool) -> Style {
+    if selected {
         Style::default()
             .bg(Color::Cyan)
             .fg(Color::Black)
@@ -639,6 +610,33 @@ fn grid_cell(
             .bg(Color::Blue)
             .fg(Color::White)
             .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    }
+}
+
+/// Show the live input with a caret while editing, otherwise the committed value.
+fn edit_text(editing: bool, input: &str, value: impl Into<String>) -> String {
+    if editing {
+        format!("{input}▏")
+    } else {
+        value.into()
+    }
+}
+
+fn grid_cell(
+    text: String,
+    selected: bool,
+    editing: bool,
+    bold: bool,
+    crosshair: bool,
+) -> Cell<'static> {
+    let style = if editing {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else if selected || crosshair {
+        focus_style(selected, crosshair)
     } else if bold {
         Style::default().add_modifier(Modifier::BOLD)
     } else {
@@ -648,20 +646,7 @@ fn grid_cell(
 }
 
 fn empty_cell(selected: bool, crosshair: bool) -> Cell<'static> {
-    let style = if selected {
-        Style::default()
-            .bg(Color::Cyan)
-            .fg(Color::Black)
-            .add_modifier(Modifier::BOLD)
-    } else if crosshair {
-        Style::default()
-            .bg(Color::Blue)
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-    };
-    Cell::from(Span::styled(" ", style))
+    Cell::from(Span::styled(" ", focus_style(selected, crosshair)))
 }
 
 fn tail_chars(input: &str, max: usize) -> String {

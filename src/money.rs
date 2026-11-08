@@ -8,12 +8,17 @@ pub fn format_cents(cents: i64) -> String {
     let mut grouped = String::new();
     let bytes = digits.as_bytes();
     for (i, byte) in bytes.iter().enumerate() {
-        if i > 0 && (bytes.len() - i) % 3 == 0 {
+        if i > 0 && (bytes.len() - i).is_multiple_of(3) {
             grouped.push(',');
         }
         grouped.push(*byte as char);
     }
-    format!("{}{}.{:02}", if negative { "-" } else { "" }, grouped, remainder)
+    format!(
+        "{}{}.{:02}",
+        if negative { "-" } else { "" },
+        grouped,
+        remainder
+    )
 }
 
 /// Parse a user- or model-supplied money string into cents.
@@ -70,11 +75,20 @@ pub fn parse_percent_bps(input: &str) -> Option<u32> {
     Some((value * 100.0).round() as u32)
 }
 
+/// Convert a part/whole pair of cent amounts into basis points, rounded to the
+/// nearest basis point. E.g. (165, 2000) -> 825 (8.25%).
+pub fn rate_bps(part_cents: i64, whole_cents: i64) -> u32 {
+    if whole_cents <= 0 {
+        return 0;
+    }
+    ((part_cents as i128 * 10_000 + whole_cents as i128 / 2) / whole_cents as i128) as u32
+}
+
 /// Format basis points as a percentage, e.g. 2000 -> "20", 1850 -> "18.5".
 pub fn format_percent_bps(bps: u32) -> String {
-    if bps % 100 == 0 {
+    if bps.is_multiple_of(100) {
         format!("{}", bps / 100)
-    } else if bps % 10 == 0 {
+    } else if bps.is_multiple_of(10) {
         format!("{}.{}", bps / 100, (bps % 100) / 10)
     } else {
         format!("{}.{:02}", bps / 100, bps % 100)
@@ -148,6 +162,13 @@ mod tests {
         assert_eq!(format_percent_bps(2000), "20");
         assert_eq!(format_percent_bps(1850), "18.5");
         assert_eq!(format_percent_bps(1855), "18.55");
+    }
+
+    #[test]
+    fn derives_rate_from_amounts() {
+        assert_eq!(rate_bps(165, 2000), 825);
+        assert_eq!(rate_bps(0, 2000), 0);
+        assert_eq!(rate_bps(5, 0), 0);
     }
 
     #[test]

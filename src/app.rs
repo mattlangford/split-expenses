@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::time::Instant;
 
@@ -7,7 +6,7 @@ use chrono::NaiveDate;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::cli::Args;
-use crate::money::{format_cents, format_percent_bps, parse_cents, parse_percent_bps};
+use crate::money::{format_cents, format_percent_bps, parse_cents, parse_percent_bps, rate_bps};
 use crate::split::{SplitResult, compute_split};
 use crate::types::{Assignments, Person, Receipt, ReceiptItem};
 use crate::{pi, state};
@@ -17,7 +16,7 @@ pub const ITEM_COLS: usize = 3;
 /// Receipt-level fields shown below the grid: merchant, date, tax, subtotal, total, tip %.
 const DETAIL_ROWS: usize = 6;
 
-const KEY_HELP: &str = "Keys\n  arrows       move between boxes\n  type         edit the highlighted box\n  Enter/Space  toggle a share\n  d / Delete   delete the focused item row (or person on a header), asks first\n  u / Ctrl+Z   undo\n  ?            this help\n  Ctrl+S       save\n  Ctrl+C       quit";
+const KEY_HELP: &str = "Keys\n  arrows       move between boxes\n  type         edit the highlighted box\n  Enter/Space  toggle a share\n  d / Delete   delete the focused item row (or person on a header), asks first\n  u / Ctrl+Z   undo\n  ?            this help\n  Ctrl+C       quit";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -95,7 +94,6 @@ pub struct App {
     pub extract_started: Instant,
     pub extract_status: String,
     pub extract_partial: String,
-    pub saved_path: Option<PathBuf>,
     /// Errors to replay to the terminal after exit.
     pub errors: Vec<String>,
     rx: Receiver<ExtractMsg>,
@@ -128,7 +126,6 @@ impl App {
             extract_started: Instant::now(),
             extract_status: String::new(),
             extract_partial: String::new(),
-            saved_path: None,
             errors: Vec::new(),
             rx,
         };
@@ -205,17 +202,14 @@ impl App {
     fn finish_extraction(&mut self, receipt: Receipt) {
         self.status = format!("Parsed {} items", receipt.items.len());
         // Default the tip rate to whatever gratuity the receipt printed.
-        let items_sum: i64 = receipt.items.iter().map(|i| i.line_total_cents).sum();
         if let Some(tip) = receipt.tip_cents {
-            if items_sum > 0 {
-                self.tip_bps =
-                    ((tip as i128 * 10_000 + items_sum as i128 / 2) / items_sum as i128) as u32;
-            }
+            self.tip_bps = rate_bps(tip, receipt.subtotal_or_items_cents());
         }
         self.receipt = Some(receipt);
         self.screen = Screen::Grid;
         self.row = 0;
         self.col = 0;
+        self.save_state();
     }
 
     pub fn split_result(&self) -> Option<SplitResult> {
@@ -248,10 +242,6 @@ impl App {
         }
         if self.help.is_some() {
             self.help = None;
-            return;
-        }
-        if control && matches!(key.code, KeyCode::Char('s') | KeyCode::Char('S')) {
-            self.save_state();
             return;
         }
         if control && matches!(key.code, KeyCode::Char('z') | KeyCode::Char('Z')) {
@@ -404,17 +394,17 @@ impl App {
                 }
             }
             EditTarget::GridItemQty(index) => {
-                if let Ok(qty) = text.parse::<u32>() {
-                    if let Some(item) = self.item_mut(index) {
-                        item.qty = qty.max(1);
-                    }
+                if let Ok(qty) = text.parse::<u32>()
+                    && let Some(item) = self.item_mut(index)
+                {
+                    item.qty = qty.max(1);
                 }
             }
             EditTarget::GridItemTotal(index) => {
-                if let Some(cents) = parse_cents(&text) {
-                    if let Some(item) = self.item_mut(index) {
-                        item.line_total_cents = cents;
-                    }
+                if let Some(cents) = parse_cents(&text)
+                    && let Some(item) = self.item_mut(index)
+                {
+                    item.line_total_cents = cents;
                 }
             }
             EditTarget::GridPersonName(index) => {
@@ -454,35 +444,36 @@ impl App {
                 }
             }
             EditTarget::Date => {
-                if let Ok(date) = NaiveDate::parse_from_str(&text, "%Y-%m-%d") {
-                    if let Some(receipt) = &mut self.receipt {
-                        receipt.transaction_date = date;
-                    }
+                if let Ok(date) = NaiveDate::parse_from_str(&text, "%Y-%m-%d")
+                    && let Some(receipt) = &mut self.receipt
+                {
+                    receipt.transaction_date = date;
                 }
             }
             EditTarget::TaxPercent => {
-                if let Some(bps) = parse_percent_bps(&text) {
-                    if let Some(receipt) = &mut self.receipt {
-                        receipt.tax_bps = bps;
-                    }
+                if let Some(bps) = parse_percent_bps(&text)
+                    && let Some(receipt) = &mut self.receipt
+                {
+                    receipt.tax_bps = bps;
                 }
             }
             EditTarget::Subtotal => {
-                if text.is_empty() {
-                    if let Some(receipt) = &mut self.receipt {
-                        receipt.subtotal_cents = None;
-                    }
-                } else if let Some(cents) = parse_cents(&text) {
-                    if let Some(receipt) = &mut self.receipt {
-                        receipt.subtotal_cents = Some(cents);
-                    }
+                let value = if text.is_empty() {
+                    Some(None)
+                } else {
+                    parse_cents(&text).map(Some)
+                };
+                if let Some(value) = value
+                    && let Some(receipt) = &mut self.receipt
+                {
+                    receipt.subtotal_cents = value;
                 }
             }
             EditTarget::Total => {
-                if let Some(cents) = parse_cents(&text) {
-                    if let Some(receipt) = &mut self.receipt {
-                        receipt.total_cents = cents;
-                    }
+                if let Some(cents) = parse_cents(&text)
+                    && let Some(receipt) = &mut self.receipt
+                {
+                    receipt.total_cents = cents;
                 }
             }
             EditTarget::TipPercent => {
@@ -491,6 +482,7 @@ impl App {
                 }
             }
         }
+        self.save_state();
     }
 
     fn begin_edit(&mut self, target: EditTarget, initial: String) {
@@ -528,6 +520,7 @@ impl App {
         if let (Some(item_id), Some(person_id)) = (item_id, person_id) {
             self.checkpoint();
             self.assignments.toggle(&item_id, &person_id);
+            self.save_state();
         }
     }
 
@@ -536,10 +529,10 @@ impl App {
         if self.row >= 1 && self.row <= items_len {
             // Any column on an item row deletes that item.
             self.confirm_delete = Some(DeleteTarget::Item(self.row - 1));
-        } else if self.row == 0 {
-            if let Some(person_index) = self.person_at_col(self.col) {
-                self.confirm_delete = Some(DeleteTarget::Person(person_index));
-            }
+        } else if self.row == 0
+            && let Some(person_index) = self.person_at_col(self.col)
+        {
+            self.confirm_delete = Some(DeleteTarget::Person(person_index));
         }
     }
 
@@ -552,6 +545,7 @@ impl App {
             DeleteTarget::Item(index) => self.delete_item(index),
             DeleteTarget::Person(index) => self.delete_person(index),
         }
+        self.save_state();
     }
 
     fn snapshot(&self) -> Snapshot {
@@ -581,6 +575,7 @@ impl App {
         };
         self.restore(snapshot);
         self.status = "Undo".to_string();
+        self.save_state();
     }
 
     fn restore(&mut self, snapshot: Snapshot) {
@@ -639,12 +634,8 @@ impl App {
             assignments: self.assignments.clone(),
             tip_bps: self.tip_bps,
         };
-        match state::save(&self.args.state_dir, &saved, &self.args.image) {
-            Ok(path) => {
-                self.status = format!("Saved {}", path.display());
-                self.saved_path = Some(path);
-            }
-            Err(error) => self.record_error(format!("failed to save state: {error:#}")),
+        if let Err(error) = state::save(&self.args.state_dir, &saved, &self.args.image) {
+            self.record_error(format!("failed to save state: {error:#}"));
         }
     }
 
@@ -770,29 +761,28 @@ impl App {
 
         let items_len = self.item_count();
         if self.row == 0 {
-            if let Some(person_index) = self.person_at_col(self.col) {
-                if let Some(split) = self.split_result() {
-                    if let Some(share) = split.shares.get(person_index) {
-                        let mut text = format!("{}\n\nItems:\n", share.name);
-                        for item in &receipt.items {
-                            if self.assignments.is_assigned(&item.id, &share.person_id) {
-                                text.push_str(&format!(
-                                    "  {}  {}\n",
-                                    item.name,
-                                    money(item.line_total_cents)
-                                ));
-                            }
-                        }
+            if let Some(person_index) = self.person_at_col(self.col)
+                && let Some(split) = self.split_result()
+                && let Some(share) = split.shares.get(person_index)
+            {
+                let mut text = format!("{}\n\nItems:\n", share.name);
+                for item in &receipt.items {
+                    if self.assignments.is_assigned(&item.id, &share.person_id) {
                         text.push_str(&format!(
-                            "\nitems {}   tax {}   tip {}   owes {}",
-                            money(share.items_cents),
-                            money(share.tax_cents),
-                            money(share.tip_cents),
-                            money(share.total_cents())
+                            "  {}  {}\n",
+                            item.name,
+                            money(item.line_total_cents)
                         ));
-                        return text;
                     }
                 }
+                text.push_str(&format!(
+                    "\nitems {}   tax {}   tip {}   owes {}",
+                    money(share.items_cents),
+                    money(share.tax_cents),
+                    money(share.tip_cents),
+                    money(share.total_cents())
+                ));
+                return text;
             }
             if self.is_add_person_col(self.col) {
                 return "Add a person\n\nType a name and press Enter. Enter again adds another; Esc finishes.".to_string();
@@ -842,7 +832,11 @@ impl App {
             if let Some(person_index) = self.person_at_col(self.col) {
                 let person = &self.people[person_index];
                 let assigned = self.assignments.is_assigned(&item.id, &person.id);
-                let count = self.assignments.participants(&item.id, &self.people).len().max(1);
+                let count = self
+                    .assignments
+                    .participants(&item.id, &self.people)
+                    .len()
+                    .max(1);
                 let share = item.line_total_cents / count as i64;
                 return format!(
                     "{}  {}\n\n{}\nShared by {} {}\n{}'s share of this item: {}",
@@ -860,10 +854,7 @@ impl App {
                 );
             }
             return match self.col {
-                0 => format!(
-                    "Item: {}",
-                    item.name
-                ),
+                0 => format!("Item: {}", item.name),
                 1 => format!(
                     "Qty: {}\n\nQuantity is informational; the line total is what gets split.",
                     item.qty
@@ -875,7 +866,7 @@ impl App {
             };
         }
 
-        "Move with the arrow keys. Type to edit the highlighted box. Space toggles a share. Ctrl+S saves.".to_string()
+        "Move with the arrow keys. Type to edit the highlighted box. Space toggles a share. Changes save automatically.".to_string()
     }
 
     pub fn edit_prompt(&self) -> &'static str {

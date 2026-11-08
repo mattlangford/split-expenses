@@ -68,8 +68,7 @@ pub fn compute_split(
     assignments: &Assignments,
     tip_bps: u32,
 ) -> SplitResult {
-    let mut items_cents: BTreeMap<String, i64> =
-        people.iter().map(|p| (p.id.clone(), 0)).collect();
+    let mut items_cents: BTreeMap<String, i64> = people.iter().map(|p| (p.id.clone(), 0)).collect();
     let mut unassigned: Vec<String> = Vec::new();
 
     for item in &receipt.items {
@@ -79,7 +78,9 @@ pub fn compute_split(
             continue;
         }
         let weights = vec![1_i64; participants.len()];
-        for (person_id, amount) in participants.iter().zip(allocate(item.line_total_cents, &weights))
+        for (person_id, amount) in participants
+            .iter()
+            .zip(allocate(item.line_total_cents, &weights))
         {
             if let Some(slot) = items_cents.get_mut(*person_id) {
                 *slot += amount;
@@ -87,10 +88,10 @@ pub fn compute_split(
         }
     }
 
-    let items_sum_cents: i64 = receipt.items.iter().map(|i| i.line_total_cents).sum();
+    let items_sum_cents = receipt.items_sum_cents();
     let assigned_sum_cents: i64 = items_cents.values().sum();
     // Rates apply to the receipt's subtotal (falling back to the items sum).
-    let subtotal_cents = receipt.subtotal_cents.unwrap_or(items_sum_cents);
+    let subtotal_cents = receipt.subtotal_or_items_cents();
 
     let tax_cents = percent_of(subtotal_cents, receipt.tax_bps);
     let tip_cents = percent_of(subtotal_cents, tip_bps);
@@ -239,7 +240,10 @@ mod tests {
     fn tax_and_tip_are_proportional_and_exact() {
         let folks = people(&["Alice", "Bob"]);
         // 10% tax, 20% tip on 4000 items.
-        let r = with_tax_bps(receipt(vec![item("steak", 3000), item("salad", 1000)], 400, 4400), 1000);
+        let r = with_tax_bps(
+            receipt(vec![item("steak", 3000), item("salad", 1000)], 400, 4400),
+            1000,
+        );
         let mut a = Assignments::default();
         a.toggle("steak", "p0");
         a.toggle("salad", "p1");

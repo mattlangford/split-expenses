@@ -3,7 +3,11 @@ use std::path::PathBuf;
 use clap::Parser;
 
 #[derive(Parser, Debug, Clone)]
-#[command(name = "split", version, about = "Split a restaurant bill from a receipt image")]
+#[command(
+    name = "split",
+    version,
+    about = "Split a restaurant bill from a receipt image"
+)]
 pub struct Args {
     /// Path to the receipt image.
     pub image: PathBuf,
