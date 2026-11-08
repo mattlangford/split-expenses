@@ -60,7 +60,6 @@ pub enum EditTarget {
     // Receipt screen (footer input)
     ItemName(usize),
     ItemQty(usize),
-    ItemUnitPrice(usize),
     ItemLineTotal(usize),
     Merchant,
     Date,
@@ -279,9 +278,8 @@ impl App {
             }
             KeyCode::Char('d') => self.delete_item(self.row),
             KeyCode::Char('i') => self.begin_receipt_edit(0),
-            KeyCode::Char('e') => self.begin_receipt_edit(2),
             KeyCode::Char('u') => self.begin_receipt_edit(1),
-            KeyCode::Char('L') => self.begin_receipt_edit(3),
+            KeyCode::Char('L') => self.begin_receipt_edit(2),
             KeyCode::Char('m') => {
                 let value = self.receipt.as_ref().map(|r| r.merchant.clone());
                 if let Some(value) = value {
@@ -400,14 +398,6 @@ impl App {
                 if let Ok(qty) = text.parse::<u32>() {
                     if let Some(item) = self.item_mut(index) {
                         item.qty = qty.max(1);
-                    }
-                }
-            }
-            EditTarget::ItemUnitPrice(index) => {
-                if let Some(cents) = parse_cents(&text) {
-                    if let Some(item) = self.item_mut(index) {
-                        item.unit_price_cents = cents;
-                        item.line_total_cents = cents * item.qty as i64;
                     }
                 }
             }
@@ -705,7 +695,7 @@ impl App {
     }
 
     fn move_receipt_col(&mut self, delta: i64) {
-        self.col = (self.col as i64 + delta).clamp(0, 3) as usize;
+        self.col = (self.col as i64 + delta).clamp(0, 2) as usize;
     }
 
     fn begin_receipt_edit(&mut self, col: usize) {
@@ -715,16 +705,12 @@ impl App {
         let (target, initial) = match col {
             0 => (EditTarget::ItemName(self.row), item.name.clone()),
             1 => (EditTarget::ItemQty(self.row), item.qty.to_string()),
-            2 => (
-                EditTarget::ItemUnitPrice(self.row),
-                money_input(item.unit_price_cents),
-            ),
             _ => (
                 EditTarget::ItemLineTotal(self.row),
                 money_input(item.line_total_cents),
             ),
         };
-        self.col = col.min(3);
+        self.col = col.min(2);
         self.begin_edit(target, initial);
     }
 
@@ -743,7 +729,7 @@ impl App {
             }
             Screen::Receipt => {
                 self.row = self.row.min(self.item_count().saturating_sub(1));
-                self.col = self.col.min(3);
+                self.col = self.col.min(2);
             }
             _ => {}
         }
@@ -777,7 +763,6 @@ impl App {
         match &self.edit {
             Some(EditTarget::ItemName(_)) => "ITEM NAME",
             Some(EditTarget::ItemQty(_)) => "QTY",
-            Some(EditTarget::ItemUnitPrice(_)) => "UNIT PRICE",
             Some(EditTarget::ItemLineTotal(_)) => "LINE TOTAL",
             Some(EditTarget::Merchant) => "MERCHANT",
             Some(EditTarget::Date) => "DATE (YYYY-MM-DD)",

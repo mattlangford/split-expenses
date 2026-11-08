@@ -33,7 +33,7 @@ Normal mode navigates with `h` `j` `k` `l` (arrows also work).
 |--------|------|
 | Any | `s` save · `q` save & quit · `Ctrl+C` save & quit |
 | Extract | `r` retry on error |
-| Receipt | `hjkl` move cell · `Enter` edit the focused field (name/qty/unit/line) · `g`/`G` top/bottom · `a` add · `d` delete · `m` merchant · `D` date · `t` tax · `S` subtotal · `T` total · `%` tip |
+| Receipt | `hjkl` move cell · `Enter` edit the focused field (name/qty/total) · `g`/`G` top/bottom · `a` add · `d` delete · `m` merchant · `D` date · `t` tax · `S` subtotal · `T` total · `%` tip |
 | Grid | `hjkl` move between cells · `Enter` toggles the assignment or edits the focused name · typing on `+ person` / `+ item` enters names inline (Enter for next, Esc done) · `d` deletes the row/column |
 | Summary | `y` copy |
 | Windows | `k`/`↑` at the top row enters the window bar; only there do `h`/`l` switch screens (tabs highlight) and `j`/`Esc` returns |

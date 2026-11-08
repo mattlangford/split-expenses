@@ -13,6 +13,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         Constraint::Length(1),
         Constraint::Min(3),
         Constraint::Length(1),
+        Constraint::Length(1),
     ])
     .split(frame.area());
 
@@ -23,7 +24,51 @@ pub fn render(frame: &mut Frame, app: &App) {
         Screen::Grid => render_grid(frame, chunks[1], app),
         Screen::Summary => render_summary(frame, chunks[1], app),
     }
-    render_footer(frame, chunks[2], app);
+    render_match_banner(frame, chunks[2], app);
+    render_footer(frame, chunks[3], app);
+}
+
+/// Green/red full-width bar showing whether the computed total ties to the receipt.
+fn render_match_banner(frame: &mut Frame, area: Rect, app: &App) {
+    if area.height == 0 {
+        return;
+    }
+    let Some(split) = app.split_result() else {
+        return;
+    };
+    let (text, background, foreground) = if split.total_matches {
+        (
+            format!(
+                "✓ MATCHES RECEIPT   computed {} = receipt {}",
+                money(split.comparable_cents),
+                money(split.receipt_total_cents)
+            ),
+            Color::Green,
+            Color::Black,
+        )
+    } else {
+        let delta = split.comparable_cents - split.receipt_total_cents;
+        (
+            format!(
+                "✗ MISMATCH   computed {} vs receipt {}   (Δ {}{})",
+                money(split.comparable_cents),
+                money(split.receipt_total_cents),
+                if delta >= 0 { "+" } else { "-" },
+                money(delta.abs())
+            ),
+            Color::Red,
+            Color::White,
+        )
+    };
+    let style = Style::default()
+        .bg(background)
+        .fg(foreground)
+        .add_modifier(Modifier::BOLD);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(format!(" {text}"), style)))
+            .block(Block::default().style(style)),
+        area,
+    );
 }
 
 fn render_tabs(frame: &mut Frame, area: Rect, app: &App) {
@@ -125,7 +170,6 @@ fn render_receipt(frame: &mut Frame, area: Rect, app: &App) {
     let header = Row::new(vec![
         Cell::from("Item"),
         Cell::from("Qty"),
-        Cell::from("Unit"),
         Cell::from("Total"),
     ])
     .style(Style::default().add_modifier(Modifier::BOLD));
@@ -140,7 +184,6 @@ fn render_receipt(frame: &mut Frame, area: Rect, app: &App) {
                 let target = match col {
                     0 => EditTarget::ItemName(index),
                     1 => EditTarget::ItemQty(index),
-                    2 => EditTarget::ItemUnitPrice(index),
                     _ => EditTarget::ItemLineTotal(index),
                 };
                 let editing = app.edit.as_ref() == Some(&target);
@@ -169,8 +212,7 @@ fn render_receipt(frame: &mut Frame, area: Rect, app: &App) {
             Row::new(vec![
                 cell(0, item.name.clone()),
                 cell(1, item.qty.to_string()),
-                cell(2, money(item.unit_price_cents)),
-                cell(3, money(item.line_total_cents)),
+                cell(2, money(item.line_total_cents)),
             ])
             .style(row_style)
         })
@@ -181,7 +223,6 @@ fn render_receipt(frame: &mut Frame, area: Rect, app: &App) {
         [
             Constraint::Min(16),
             Constraint::Length(4),
-            Constraint::Length(10),
             Constraint::Length(10),
         ],
     )

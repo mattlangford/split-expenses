@@ -73,9 +73,9 @@ Keep the math modules free of I/O and TUI types.
   row open inline text entry. `App::adding_people` and `adding_items` keep that
   entry going across Enters; `begin_edit` clears them and `App::edit_prompt` labels
   the footer.
-- The Receipt item table is cell-editable too: `hjkl` moves across name/qty/unit/line
+- The Receipt item table is cell-editable too: `hjkl` moves across name/qty/total
   and `Enter` edits the focused cell inline (receipt-level fields use the footer keys
-  `m`/`D`/`t`/`S`/`T`/`%`).
+  `m`/`D`/`t`/`S`/`T`/`%`). Unit price is not shown or edited.
 - Pressing up (`k`) at the top row of Grid/Receipt moves the cursor into the window
   bar (`App::window_focus`): the tabs get the blue highlight and `h`/`l` switch
   screens via `switch_screen`, while `j`/`Esc` returns. Outside window focus the tabs
