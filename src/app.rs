@@ -16,7 +16,7 @@ pub const ITEM_COLS: usize = 3;
 /// Receipt-level fields shown below the grid: merchant, date, tax, subtotal, total, tip %.
 const DETAIL_ROWS: usize = 6;
 
-const KEY_HELP: &str = "Keys\n  arrows       move between boxes\n  type         edit the highlighted box\n  Enter/Space  toggle a share\n  d / Delete   delete the focused item row (or person on a header), asks first\n  u / Ctrl+Z   undo\n  ?            this help\n  Ctrl+C       quit";
+const KEY_HELP: &str = "Keys\n  arrows       move between boxes\n  type         edit the highlighted box\n  Enter        edit the box, or toggle a share\n  Space        toggle a share\n  d / Delete   delete the focused item row (or person on a header), asks first\n  u / Ctrl+Z   undo\n  ?            this help\n  Ctrl+C       quit";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -88,6 +88,8 @@ pub struct App {
     /// Pending "are you sure" delete target.
     pub confirm_delete: Option<DeleteTarget>,
     undo: Vec<Snapshot>,
+    /// When set, the next character typed replaces the seeded editor value.
+    replace_on_type: bool,
     pub adding_people: bool,
     pub adding_items: bool,
     pub spinner: usize,
@@ -120,6 +122,7 @@ impl App {
             help: None,
             confirm_delete: None,
             undo: Vec::new(),
+            replace_on_type: false,
             adding_people: false,
             adding_items: false,
             spinner: 0,
@@ -268,7 +271,14 @@ impl App {
             KeyCode::Down => self.move_grid(1, 0),
             KeyCode::Left => self.move_grid(0, -1),
             KeyCode::Right => self.move_grid(0, 1),
-            KeyCode::Char(' ') | KeyCode::Enter => self.grid_toggle(),
+            KeyCode::Char(' ') => self.grid_toggle(),
+            KeyCode::Enter => {
+                if self.is_assignment_cell() {
+                    self.grid_toggle();
+                } else {
+                    self.begin_edit_focused();
+                }
+            }
             KeyCode::Delete | KeyCode::Backspace | KeyCode::Char('d') => self.request_delete(),
             KeyCode::Char('u') => self.undo(),
             KeyCode::Char('?') => self.help = Some(self.help_text()),
@@ -348,6 +358,7 @@ impl App {
     fn handle_insert(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
+                self.replace_on_type = false;
                 self.adding_people = false;
                 self.adding_items = false;
                 self.mode = Mode::Normal;
@@ -360,9 +371,14 @@ impl App {
             KeyCode::Left => self.commit_and_move(0, -1),
             KeyCode::Right => self.commit_and_move(0, 1),
             KeyCode::Backspace => {
+                self.replace_on_type = false;
                 self.input.pop();
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if self.replace_on_type {
+                    self.input.clear();
+                    self.replace_on_type = false;
+                }
                 self.input.push(c)
             }
             _ => {}
@@ -385,6 +401,7 @@ impl App {
         let text = self.input.trim().to_string();
         self.checkpoint();
         self.mode = Mode::Normal;
+        self.replace_on_type = false;
         self.input.clear();
 
         match target {
@@ -488,9 +505,77 @@ impl App {
     fn begin_edit(&mut self, target: EditTarget, initial: String) {
         self.adding_people = false;
         self.adding_items = false;
+        self.replace_on_type = false;
         self.edit = Some(target);
         self.input = initial;
         self.mode = Mode::Insert;
+    }
+
+    /// Start editing the highlighted field via Enter, seeded with its current
+    /// value. The first typed character replaces that value, exactly as if the
+    /// user had started typing on the cell; Backspace edits the seeded value.
+    fn begin_edit_focused(&mut self) {
+        let Some(target) = self.focused_target() else {
+            return;
+        };
+        let new_person = matches!(target, EditTarget::GridNewPerson);
+        let new_item = matches!(target, EditTarget::GridNewItem);
+        let initial = self.current_value(&target);
+        self.begin_edit(target, initial);
+        self.adding_people = new_person;
+        self.adding_items = new_item;
+        self.replace_on_type = true;
+    }
+
+    /// The committed value of an editable field, used to seed the editor.
+    fn current_value(&self, target: &EditTarget) -> String {
+        match target {
+            EditTarget::GridItemName(index) => self
+                .item(*index)
+                .map(|item| item.name.clone())
+                .unwrap_or_default(),
+            EditTarget::GridItemQty(index) => self
+                .item(*index)
+                .map(|item| item.qty.to_string())
+                .unwrap_or_default(),
+            EditTarget::GridItemTotal(index) => self
+                .item(*index)
+                .map(|item| format_cents(item.line_total_cents))
+                .unwrap_or_default(),
+            EditTarget::GridPersonName(index) => self
+                .people
+                .get(*index)
+                .map(|person| person.name.clone())
+                .unwrap_or_default(),
+            EditTarget::GridNewPerson | EditTarget::GridNewItem => String::new(),
+            EditTarget::Merchant => self
+                .receipt
+                .as_ref()
+                .map(|receipt| receipt.merchant.clone())
+                .unwrap_or_default(),
+            EditTarget::Date => self
+                .receipt
+                .as_ref()
+                .map(|receipt| receipt.transaction_date.to_string())
+                .unwrap_or_default(),
+            EditTarget::Subtotal => self
+                .receipt
+                .as_ref()
+                .and_then(|receipt| receipt.subtotal_cents)
+                .map(format_cents)
+                .unwrap_or_default(),
+            EditTarget::Total => self
+                .receipt
+                .as_ref()
+                .map(|receipt| format_cents(receipt.total_cents))
+                .unwrap_or_default(),
+            EditTarget::TaxPercent => self
+                .receipt
+                .as_ref()
+                .map(|receipt| format_percent_bps(receipt.tax_bps))
+                .unwrap_or_default(),
+            EditTarget::TipPercent => format_percent_bps(self.tip_bps),
+        }
     }
 
     fn begin_grid_new_person(&mut self) {
@@ -505,6 +590,12 @@ impl App {
         self.col = 0;
         self.begin_edit(EditTarget::GridNewItem, String::new());
         self.adding_items = true;
+    }
+
+    /// True when the cursor is on an item row and a person column, where
+    /// Space/Enter toggle that person's share of the item.
+    fn is_assignment_cell(&self) -> bool {
+        self.row >= 1 && self.row <= self.item_count() && self.person_at_col(self.col).is_some()
     }
 
     fn grid_toggle(&mut self) {
@@ -587,6 +678,7 @@ impl App {
         self.col = snapshot.col;
         self.mode = Mode::Normal;
         self.edit = None;
+        self.replace_on_type = false;
         self.input.clear();
         self.adding_people = false;
         self.adding_items = false;
@@ -866,7 +958,7 @@ impl App {
             };
         }
 
-        "Move with the arrow keys. Type to edit the highlighted box. Space toggles a share. Changes save automatically.".to_string()
+        "Move with the arrow keys. Type (or press Enter) to edit the highlighted box. Space toggles a share. Changes save automatically.".to_string()
     }
 
     pub fn edit_prompt(&self) -> &'static str {

@@ -523,7 +523,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         let hints = match app.screen {
             Screen::Extracting => "r retry · Ctrl+C quit",
             Screen::Grid => {
-                "? help · arrows move · type to edit · Space toggle · d delete · u undo · Ctrl+C quit"
+                "? help · arrows move · type or Enter edit · Space toggle · d delete · u undo · Ctrl+C quit"
             }
         };
         let status = if app.status.is_empty() {
