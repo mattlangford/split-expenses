@@ -14,6 +14,10 @@ use crate::{pi, state};
 
 /// Columns before the people columns: item name, qty, line total.
 pub const ITEM_COLS: usize = 3;
+/// Receipt-level fields shown below the grid: merchant, date, tax, subtotal, total, tip %.
+const DETAIL_ROWS: usize = 6;
+
+const KEY_HELP: &str = "Keys\n  arrows       move between boxes\n  type         edit the highlighted box\n  Enter/Space  toggle a share\n  d / Delete   delete the focused item row (or person on a header), asks first\n  u / Ctrl+Z   undo\n  ?            this help\n  Ctrl+S       save\n  Ctrl+C       quit";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -37,10 +41,27 @@ pub enum EditTarget {
     GridNewItem,
     Merchant,
     Date,
-    Tax,
+    TaxPercent,
     Subtotal,
     Total,
     TipPercent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteTarget {
+    Item(usize),
+    Person(usize),
+}
+
+/// A point-in-time copy of the document state, for undo.
+#[derive(Clone)]
+struct Snapshot {
+    receipt: Option<Receipt>,
+    people: Vec<Person>,
+    assignments: Assignments,
+    tip_bps: u32,
+    row: usize,
+    col: usize,
 }
 
 enum ExtractMsg {
@@ -63,6 +84,11 @@ pub struct App {
     pub col: usize,
     pub edit: Option<EditTarget>,
     pub input: String,
+    /// Contextual info popup text, shown when `?` is pressed.
+    pub help: Option<String>,
+    /// Pending "are you sure" delete target.
+    pub confirm_delete: Option<DeleteTarget>,
+    undo: Vec<Snapshot>,
     pub adding_people: bool,
     pub adding_items: bool,
     pub spinner: usize,
@@ -93,6 +119,9 @@ impl App {
             col: 0,
             edit: None,
             input: String::new(),
+            help: None,
+            confirm_delete: None,
+            undo: Vec::new(),
             adding_people: false,
             adding_items: false,
             spinner: 0,
@@ -103,17 +132,22 @@ impl App {
             errors: Vec::new(),
             rx,
         };
-        match state::load_by_image(&app.args.state_dir, &app.args.image) {
-            Ok(Some(saved)) => {
-                let merchant = saved.receipt.merchant.clone();
-                app.receipt = Some(saved.receipt);
-                app.people = saved.people;
-                app.assignments = saved.assignments;
-                app.tip_bps = saved.tip_bps;
-                app.screen = Screen::Grid;
-                app.status = format!("Reloaded saved split for {merchant}");
+        if app.args.clean {
+            app.status = "Clean run: re-parsing the receipt".to_string();
+            app.start_extraction();
+        } else {
+            match state::load_by_image(&app.args.state_dir, &app.args.image) {
+                Ok(Some(saved)) => {
+                    let merchant = saved.receipt.merchant.clone();
+                    app.receipt = Some(saved.receipt);
+                    app.people = saved.people;
+                    app.assignments = saved.assignments;
+                    app.tip_bps = saved.tip_bps;
+                    app.screen = Screen::Grid;
+                    app.status = format!("Reloaded saved split for {merchant}");
+                }
+                _ => app.start_extraction(),
             }
-            _ => app.start_extraction(),
         }
         app
     }
@@ -170,6 +204,14 @@ impl App {
 
     fn finish_extraction(&mut self, receipt: Receipt) {
         self.status = format!("Parsed {} items", receipt.items.len());
+        // Default the tip rate to whatever gratuity the receipt printed.
+        let items_sum: i64 = receipt.items.iter().map(|i| i.line_total_cents).sum();
+        if let Some(tip) = receipt.tip_cents {
+            if items_sum > 0 {
+                self.tip_bps =
+                    ((tip as i128 * 10_000 + items_sum as i128 / 2) / items_sum as i128) as u32;
+            }
+        }
         self.receipt = Some(receipt);
         self.screen = Screen::Grid;
         self.row = 0;
@@ -187,18 +229,37 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
-        if key.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
-        {
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        if control && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C')) {
             self.save_and_quit();
+            return;
+        }
+        if self.confirm_delete.is_some() {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                    self.confirm_delete_now();
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.confirm_delete = None;
+                }
+                _ => {}
+            }
+            return;
+        }
+        if self.help.is_some() {
+            self.help = None;
+            return;
+        }
+        if control && matches!(key.code, KeyCode::Char('s') | KeyCode::Char('S')) {
+            self.save_state();
+            return;
+        }
+        if control && matches!(key.code, KeyCode::Char('z') | KeyCode::Char('Z')) {
+            self.undo();
             return;
         }
         if self.mode == Mode::Insert {
             self.handle_insert(key);
-            return;
-        }
-        if matches!(key.code, KeyCode::Char('q')) {
-            self.save_and_quit();
             return;
         }
         match self.screen {
@@ -213,58 +274,84 @@ impl App {
 
     fn handle_grid(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char('h') | KeyCode::Left => self.move_grid(0, -1),
-            KeyCode::Char('l') | KeyCode::Right => self.move_grid(0, 1),
-            KeyCode::Char('j') | KeyCode::Down => self.move_grid(1, 0),
-            KeyCode::Char('k') | KeyCode::Up => self.move_grid(-1, 0),
-            KeyCode::Char('g') => self.row = 0,
-            KeyCode::Char('G') => self.row = self.grid_rows().saturating_sub(1),
-            KeyCode::Enter => self.grid_enter(),
-            KeyCode::Char(' ') | KeyCode::Tab => self.grid_toggle(),
-            KeyCode::Char('d') => self.grid_delete(),
-            KeyCode::Char('a') => self.begin_grid_new_person(),
-            KeyCode::Char('s') => self.save_state(),
-            KeyCode::Char('m') => {
-                let value = self.receipt.as_ref().map(|r| r.merchant.clone());
-                if let Some(value) = value {
-                    self.begin_edit(EditTarget::Merchant, value);
-                }
-            }
-            KeyCode::Char('D') => {
-                let value = self
-                    .receipt
-                    .as_ref()
-                    .map(|r| r.transaction_date.format("%Y-%m-%d").to_string());
-                if let Some(value) = value {
-                    self.begin_edit(EditTarget::Date, value);
-                }
-            }
-            KeyCode::Char('t') => {
-                let value = self.receipt.as_ref().map(|r| money_input(r.tax_cents));
-                if let Some(value) = value {
-                    self.begin_edit(EditTarget::Tax, value);
-                }
-            }
-            KeyCode::Char('S') => {
-                let value = self
-                    .receipt
-                    .as_ref()
-                    .map(|r| r.subtotal_cents.map(money_input).unwrap_or_default());
-                if let Some(value) = value {
-                    self.begin_edit(EditTarget::Subtotal, value);
-                }
-            }
-            KeyCode::Char('T') => {
-                let value = self.receipt.as_ref().map(|r| money_input(r.total_cents));
-                if let Some(value) = value {
-                    self.begin_edit(EditTarget::Total, value);
-                }
-            }
-            KeyCode::Char('%') => {
-                let value = format_percent_bps(self.tip_bps);
-                self.begin_edit(EditTarget::TipPercent, value);
+            KeyCode::Up => self.move_grid(-1, 0),
+            KeyCode::Down => self.move_grid(1, 0),
+            KeyCode::Left => self.move_grid(0, -1),
+            KeyCode::Right => self.move_grid(0, 1),
+            KeyCode::Char(' ') | KeyCode::Enter => self.grid_toggle(),
+            KeyCode::Delete | KeyCode::Backspace | KeyCode::Char('d') => self.request_delete(),
+            KeyCode::Char('u') => self.undo(),
+            KeyCode::Char('?') => self.help = Some(self.help_text()),
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.type_into_cell(c);
             }
             _ => {}
+        }
+    }
+
+    /// Typing while a cell/field is highlighted starts editing it, replacing the
+    /// value with the typed character.
+    fn type_into_cell(&mut self, c: char) {
+        let Some(target) = self.focused_target() else {
+            return;
+        };
+        if is_numeric_target(&target) && !is_numeric_char(c) {
+            return;
+        }
+        if matches!(target, EditTarget::Date) && !(c.is_ascii_digit() || c == '-' || c == '/') {
+            return;
+        }
+        let new_person = matches!(target, EditTarget::GridNewPerson);
+        let new_item = matches!(target, EditTarget::GridNewItem);
+        self.begin_edit(target, c.to_string());
+        self.adding_people = new_person;
+        self.adding_items = new_item;
+    }
+
+    fn focused_target(&self) -> Option<EditTarget> {
+        let items_len = self.item_count();
+        let grid_rows = self.grid_row_count();
+        if self.row < grid_rows {
+            if self.row == 0 {
+                if let Some(person_index) = self.person_at_col(self.col) {
+                    return Some(EditTarget::GridPersonName(person_index));
+                }
+                if self.is_add_person_col(self.col) {
+                    return Some(EditTarget::GridNewPerson);
+                }
+                return None;
+            }
+            if self.row == items_len + 1 {
+                if self.col == 0 {
+                    return Some(EditTarget::GridNewItem);
+                }
+                return None;
+            }
+            if self.row == items_len + 2 {
+                return Some(EditTarget::TaxPercent);
+            }
+            if self.row == items_len + 3 {
+                return Some(EditTarget::TipPercent);
+            }
+            if self.row == items_len + 4 {
+                // "Owed" summary row: not editable.
+                return None;
+            }
+            let index = self.row - 1;
+            return match self.col {
+                0 => Some(EditTarget::GridItemName(index)),
+                1 => Some(EditTarget::GridItemQty(index)),
+                2 => Some(EditTarget::GridItemTotal(index)),
+                _ => None,
+            };
+        }
+        match self.row - grid_rows {
+            0 => Some(EditTarget::Merchant),
+            1 => Some(EditTarget::Date),
+            2 => Some(EditTarget::Subtotal),
+            3 => Some(EditTarget::TaxPercent),
+            4 => Some(EditTarget::Total),
+            _ => Some(EditTarget::TipPercent),
         }
     }
 
@@ -278,15 +365,27 @@ impl App {
                 self.input.clear();
             }
             KeyCode::Enter => self.commit_edit(),
+            KeyCode::Up => self.commit_and_move(-1, 0),
+            KeyCode::Down => self.commit_and_move(1, 0),
+            KeyCode::Left => self.commit_and_move(0, -1),
+            KeyCode::Right => self.commit_and_move(0, 1),
             KeyCode::Backspace => {
                 self.input.pop();
             }
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.input.clear();
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.input.push(c)
             }
-            KeyCode::Char(c) => self.input.push(c),
             _ => {}
         }
+    }
+
+    /// Commit the current edit and move the cursor (used when an arrow key is
+    /// pressed while typing, so Enter is not required to leave the box).
+    fn commit_and_move(&mut self, row_delta: i64, col_delta: i64) {
+        self.adding_people = false;
+        self.adding_items = false;
+        self.commit_edit();
+        self.move_grid(row_delta, col_delta);
     }
 
     fn commit_edit(&mut self) {
@@ -294,6 +393,7 @@ impl App {
             return;
         };
         let text = self.input.trim().to_string();
+        self.checkpoint();
         self.mode = Mode::Normal;
         self.input.clear();
 
@@ -339,7 +439,7 @@ impl App {
                     if let Some(receipt) = &mut self.receipt {
                         receipt.items.push(ReceiptItem::new(text));
                     }
-                    self.row = self.grid_rows() - 1;
+                    self.row = self.item_count() + 1;
                     self.col = 0;
                     if self.adding_items {
                         self.begin_grid_new_item();
@@ -360,10 +460,10 @@ impl App {
                     }
                 }
             }
-            EditTarget::Tax => {
-                if let Some(cents) = parse_cents(&text) {
+            EditTarget::TaxPercent => {
+                if let Some(bps) = parse_percent_bps(&text) {
                     if let Some(receipt) = &mut self.receipt {
-                        receipt.tax_cents = cents;
+                        receipt.tax_bps = bps;
                     }
                 }
             }
@@ -409,51 +509,10 @@ impl App {
     }
 
     fn begin_grid_new_item(&mut self) {
-        self.row = self.grid_rows().saturating_sub(1);
+        self.row = self.item_count() + 1;
         self.col = 0;
         self.begin_edit(EditTarget::GridNewItem, String::new());
         self.adding_items = true;
-    }
-
-    fn grid_enter(&mut self) {
-        let items_len = self.item_count();
-        if self.row == 0 {
-            if let Some(person_index) = self.person_at_col(self.col) {
-                let value = self.people.get(person_index).map(|p| p.name.clone());
-                if let Some(value) = value {
-                    self.begin_edit(EditTarget::GridPersonName(person_index), value);
-                }
-            } else if self.is_add_person_col(self.col) {
-                self.begin_grid_new_person();
-            }
-        } else if self.row == items_len + 1 {
-            self.begin_grid_new_item();
-        } else if self.row >= 1 {
-            let index = self.row - 1;
-            match self.col {
-                0 => {
-                    let value = self.item(index).map(|item| item.name.clone());
-                    if let Some(value) = value {
-                        self.begin_edit(EditTarget::GridItemName(index), value);
-                    }
-                }
-                1 => {
-                    let value = self.item(index).map(|item| item.qty.to_string());
-                    if let Some(value) = value {
-                        self.begin_edit(EditTarget::GridItemQty(index), value);
-                    }
-                }
-                2 => {
-                    let value = self
-                        .item(index)
-                        .map(|item| money_input(item.line_total_cents));
-                    if let Some(value) = value {
-                        self.begin_edit(EditTarget::GridItemTotal(index), value);
-                    }
-                }
-                _ => self.grid_toggle(),
-            }
-        }
     }
 
     fn grid_toggle(&mut self) {
@@ -467,19 +526,76 @@ impl App {
         let item_id = self.item(self.row - 1).map(|item| item.id.clone());
         let person_id = self.people.get(person_index).map(|p| p.id.clone());
         if let (Some(item_id), Some(person_id)) = (item_id, person_id) {
+            self.checkpoint();
             self.assignments.toggle(&item_id, &person_id);
         }
     }
 
-    fn grid_delete(&mut self) {
+    fn request_delete(&mut self) {
         let items_len = self.item_count();
-        if self.row >= 1 && self.row <= items_len && self.col == 0 {
-            self.delete_item(self.row - 1);
+        if self.row >= 1 && self.row <= items_len {
+            // Any column on an item row deletes that item.
+            self.confirm_delete = Some(DeleteTarget::Item(self.row - 1));
         } else if self.row == 0 {
             if let Some(person_index) = self.person_at_col(self.col) {
-                self.delete_person(person_index);
+                self.confirm_delete = Some(DeleteTarget::Person(person_index));
             }
         }
+    }
+
+    fn confirm_delete_now(&mut self) {
+        let Some(target) = self.confirm_delete.take() else {
+            return;
+        };
+        self.checkpoint();
+        match target {
+            DeleteTarget::Item(index) => self.delete_item(index),
+            DeleteTarget::Person(index) => self.delete_person(index),
+        }
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            receipt: self.receipt.clone(),
+            people: self.people.clone(),
+            assignments: self.assignments.clone(),
+            tip_bps: self.tip_bps,
+            row: self.row,
+            col: self.col,
+        }
+    }
+
+    /// Push the current state before a mutation so it can be undone.
+    fn checkpoint(&mut self) {
+        let snapshot = self.snapshot();
+        self.undo.push(snapshot);
+        if self.undo.len() > 100 {
+            self.undo.remove(0);
+        }
+    }
+
+    fn undo(&mut self) {
+        let Some(snapshot) = self.undo.pop() else {
+            self.status = "Nothing to undo".to_string();
+            return;
+        };
+        self.restore(snapshot);
+        self.status = "Undo".to_string();
+    }
+
+    fn restore(&mut self, snapshot: Snapshot) {
+        self.receipt = snapshot.receipt;
+        self.people = snapshot.people;
+        self.assignments = snapshot.assignments;
+        self.tip_bps = snapshot.tip_bps;
+        self.row = snapshot.row;
+        self.col = snapshot.col;
+        self.mode = Mode::Normal;
+        self.edit = None;
+        self.input.clear();
+        self.adding_people = false;
+        self.adding_items = false;
+        self.clamp_cursor();
     }
 
     fn delete_item(&mut self, index: usize) {
@@ -558,23 +674,34 @@ impl App {
     }
 
     fn move_grid(&mut self, row_delta: i64, col_delta: i64) {
-        let rows = self.grid_rows();
+        let rows = self.total_rows();
         let cols = self.grid_cols();
         self.row = clamp_add(self.row, row_delta, rows);
         self.col = clamp_add(self.col, col_delta, cols);
     }
 
     fn clamp_cursor(&mut self) {
-        self.row = self.row.min(self.grid_rows().saturating_sub(1));
+        self.row = self.row.min(self.total_rows().saturating_sub(1));
         self.col = self.col.min(self.grid_cols().saturating_sub(1));
     }
 
-    fn grid_rows(&self) -> usize {
-        self.item_count() + 2
+    /// header + items + "+ item" + "Tax" + "Tip" + "Owed".
+    fn grid_row_count(&self) -> usize {
+        self.item_count() + 5
+    }
+
+    fn total_rows(&self) -> usize {
+        self.grid_row_count() + DETAIL_ROWS
     }
 
     fn grid_cols(&self) -> usize {
         self.people.len() + ITEM_COLS + 1
+    }
+
+    /// Which receipt-level detail row the cursor is on, if any.
+    pub fn detail_focus(&self) -> Option<usize> {
+        let grid = self.grid_row_count();
+        (self.row >= grid).then(|| self.row - grid)
     }
 
     fn person_at_col(&self, col: usize) -> Option<usize> {
@@ -605,6 +732,152 @@ impl App {
         self.receipt.as_ref().map(|r| r.items.len()).unwrap_or(0)
     }
 
+    /// Popup text: contextual info about the highlighted box plus a key reference.
+    pub fn help_text(&self) -> String {
+        format!("{}\n\n{KEY_HELP}", self.context_help())
+    }
+
+    /// Contextual text for the `?` popup, based on the highlighted box.
+    fn context_help(&self) -> String {
+        let Some(receipt) = &self.receipt else {
+            return "Reading the receipt with pi…".to_string();
+        };
+        if let Some(detail) = self.detail_focus() {
+            return match detail {
+                0 => format!(
+                    "Merchant\n\nNames the saved state for this image.\nCurrent: {}",
+                    receipt.merchant
+                ),
+                1 => format!(
+                    "Date\n\nTransaction date, stored with the merchant.\nCurrent: {}",
+                    receipt.transaction_date
+                ),
+                2 => format!(
+                    "Subtotal\n\nPre-tax total printed on the receipt.\nCurrent: {}",
+                    receipt
+                        .subtotal_cents
+                        .map(money)
+                        .unwrap_or_else(|| "(none)".to_string())
+                ),
+                _ => format!(
+                    "Receipt total\n\nPrinted final amount. The receipt check at the bottom compares the parsed items+tax to it.\nCurrent: {}\nTotal includes tax: {}\nTotal includes tip: {}",
+                    money(receipt.total_cents),
+                    receipt.total_includes_tax,
+                    receipt.total_includes_tip
+                ),
+            };
+        }
+
+        let items_len = self.item_count();
+        if self.row == 0 {
+            if let Some(person_index) = self.person_at_col(self.col) {
+                if let Some(split) = self.split_result() {
+                    if let Some(share) = split.shares.get(person_index) {
+                        let mut text = format!("{}\n\nItems:\n", share.name);
+                        for item in &receipt.items {
+                            if self.assignments.is_assigned(&item.id, &share.person_id) {
+                                text.push_str(&format!(
+                                    "  {}  {}\n",
+                                    item.name,
+                                    money(item.line_total_cents)
+                                ));
+                            }
+                        }
+                        text.push_str(&format!(
+                            "\nitems {}   tax {}   tip {}   owes {}",
+                            money(share.items_cents),
+                            money(share.tax_cents),
+                            money(share.tip_cents),
+                            money(share.total_cents())
+                        ));
+                        return text;
+                    }
+                }
+            }
+            if self.is_add_person_col(self.col) {
+                return "Add a person\n\nType a name and press Enter. Enter again adds another; Esc finishes.".to_string();
+            }
+            return format!(
+                "{} column",
+                match self.col {
+                    0 => "Item",
+                    1 => "Qty",
+                    _ => "Total",
+                }
+            );
+        }
+        if self.row == items_len + 1 {
+            return "Add an item\n\nType a name and press Enter. Enter again adds another; Esc finishes.".to_string();
+        }
+        if self.row == items_len + 2 {
+            return format!(
+                "Tax\n\nRate applied to the items.\nCurrent: {}%",
+                format_percent_bps(receipt.tax_bps)
+            );
+        }
+        if self.row == items_len + 3 {
+            return format!(
+                "Tip\n\nRate applied to the items.\nCurrent: {}%",
+                format_percent_bps(self.tip_bps)
+            );
+        }
+        if self.row == items_len + 4 {
+            let owed: Vec<String> = self
+                .split_result()
+                .map(|split| {
+                    split
+                        .shares
+                        .iter()
+                        .map(|share| format!("{} {}", share.name, money(share.total_cents())))
+                        .collect()
+                })
+                .unwrap_or_default();
+            return format!(
+                "Owed\n\nEach person's share of items + tax + tip.\n{}",
+                owed.join("\n")
+            );
+        }
+        if self.row >= 1 && self.row <= items_len {
+            let item = &receipt.items[self.row - 1];
+            if let Some(person_index) = self.person_at_col(self.col) {
+                let person = &self.people[person_index];
+                let assigned = self.assignments.is_assigned(&item.id, &person.id);
+                let count = self.assignments.participants(&item.id, &self.people).len().max(1);
+                let share = item.line_total_cents / count as i64;
+                return format!(
+                    "{}  {}\n\n{}\nShared by {} {}\n{}'s share of this item: {}",
+                    item.name,
+                    money(item.line_total_cents),
+                    if assigned {
+                        "Marked for this person."
+                    } else {
+                        "Not marked for this person."
+                    },
+                    count,
+                    if count == 1 { "person" } else { "people" },
+                    person.name,
+                    money(share)
+                );
+            }
+            return match self.col {
+                0 => format!(
+                    "Item: {}",
+                    item.name
+                ),
+                1 => format!(
+                    "Qty: {}\n\nQuantity is informational; the line total is what gets split.",
+                    item.qty
+                ),
+                _ => format!(
+                    "Total: {}\n\nSplit equally between everyone marked for this item.",
+                    money(item.line_total_cents)
+                ),
+            };
+        }
+
+        "Move with the arrow keys. Type to edit the highlighted box. Space toggles a share. Ctrl+S saves.".to_string()
+    }
+
     pub fn edit_prompt(&self) -> &'static str {
         match &self.edit {
             Some(EditTarget::GridItemName(_)) => "ITEM NAME",
@@ -615,13 +888,29 @@ impl App {
             Some(EditTarget::GridNewItem) => "ADD ITEM (Enter for next, Esc done)",
             Some(EditTarget::Merchant) => "MERCHANT",
             Some(EditTarget::Date) => "DATE (YYYY-MM-DD)",
-            Some(EditTarget::Tax) => "TAX",
+            Some(EditTarget::TaxPercent) => "TAX %",
             Some(EditTarget::Subtotal) => "SUBTOTAL",
             Some(EditTarget::Total) => "RECEIPT TOTAL",
             Some(EditTarget::TipPercent) => "TIP %",
             None => "EDIT",
         }
     }
+}
+
+fn is_numeric_target(target: &EditTarget) -> bool {
+    matches!(
+        target,
+        EditTarget::GridItemQty(_)
+            | EditTarget::GridItemTotal(_)
+            | EditTarget::TaxPercent
+            | EditTarget::Subtotal
+            | EditTarget::Total
+            | EditTarget::TipPercent
+    )
+}
+
+fn is_numeric_char(c: char) -> bool {
+    c.is_ascii_digit() || matches!(c, '.' | '-' | ',' | '$' | '%')
 }
 
 fn clamp_add(value: usize, delta: i64, len: usize) -> usize {
@@ -634,8 +923,4 @@ fn clamp_add(value: usize, delta: i64, len: usize) -> usize {
 
 pub fn money(cents: i64) -> String {
     format!("${}", format_cents(cents))
-}
-
-fn money_input(cents: i64) -> String {
-    format!("{}.{:02}", cents / 100, (cents % 100).abs())
 }

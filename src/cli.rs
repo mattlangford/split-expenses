@@ -19,4 +19,8 @@ pub struct Args {
     /// pi executable to shell out to.
     #[arg(long, default_value = "pi")]
     pub pi_bin: String,
+
+    /// Ignore any saved split for this image and re-parse / recalculate from scratch.
+    #[arg(long)]
+    pub clean: bool,
 }

@@ -33,6 +33,9 @@ pub struct Receipt {
     pub items: Vec<ReceiptItem>,
     pub subtotal_cents: Option<i64>,
     pub tax_cents: i64,
+    /// Tax rate in basis points (hundredths of a percent), e.g. 887 = 8.87%.
+    #[serde(default)]
+    pub tax_bps: u32,
     /// Tip/gratuity already printed on the receipt, if any.
     #[serde(default)]
     pub tip_cents: Option<i64>,

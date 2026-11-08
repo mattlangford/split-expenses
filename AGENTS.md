@@ -29,7 +29,7 @@ To exercise the CLI without opening a TUI: `cargo build` then
 
 ```
 src/main.rs   entry point, terminal init, event loop, mod declarations
-src/cli.rs    clap Args (--model default google/gemini-3.1-flash-lite-image, --state-dir, --pi-bin)
+src/cli.rs    clap Args (--model, --state-dir, --pi-bin, --clean)
 src/types.rs  Receipt (incl. tax/tip inclusion flags), ReceiptItem, Person, Assignments
 src/money.rs  cents parse/format, parse/format tip basis points, allocate()
 src/split.rs  compute_split(): per-person allocation + reconciliation
@@ -48,14 +48,20 @@ Keep the math modules free of I/O and TUI types.
   `money.rs`.
 - **Allocations go through `money::allocate`** (largest-remainder) so split sums
   are exact. Do not hand-roll proportional division.
-- Tip is stored as **basis points** (`u32`), default `2000` (= 20%), computed on
-  the pre-tax subtotal; a tip/gratuity printed on the receipt takes precedence.
+- Tax and tip are stored as **basis points** (`Receipt::tax_bps`, `App::tip_bps`),
+  applied to the receipt **subtotal** (`subtotal_cents`, falling back to the items
+  sum) via `split::percent_of`. The parser fills `tax_bps` from the printed tax (or
+  `total − subtotal`) and `finish_extraction` derives `tip_bps` from a printed
+  gratuity; both are editable `Tax`/`Tip` rows in the grid.
 - Item split rule: `line_total` divided equally among the people assigned to that
   item (`Assignments`).
-- Tax and tip are allocated in proportion to each person's item subtotal.
+- Tax and tip are allocated in proportion to each person's item subtotal, and only
+  among people with a non-zero item subtotal. `money::allocate` returns all zeros for
+  an all-zero weight vector, so an entirely unassigned bill owes nothing.
 - The TUI has a Normal/Insert mode model: `app.rs` handles keys, `ui.rs` only
-  renders. Navigation is vim-style (`hjkl`), arrows also accepted.
-- Quit keys are `q` (Normal mode) and `Ctrl+C` (any mode); both save state first.
+  renders. Navigation is **arrow keys only**; typing on the highlighted cell/field
+  enters Insert mode with the typed character replacing the value.
+- Save is `Ctrl+S`; quit is `Ctrl+C` (saves state first).
 - Errors are shown in the TUI **and** replayed to stderr after the terminal is
   restored, so they survive exit. Route failure paths through `App::record_error`
   (or `App::error` for extraction) rather than only setting `status`; `main`
@@ -67,22 +73,35 @@ Keep the math modules free of I/O and TUI types.
   the same image reloads the saved split at startup and skips OCR
   (`state::load_by_image`); the canonical file still lives under
   `/tmp/split-expense/<merchant>/<date>/` with a pointer in `by-image/<hash>`.
-- There is a single Grid view (screens are only `Extracting` and `Grid`). It is a
-  spreadsheet: item name/qty/total columns, one column per person, then a `+ person`
-  column, plus a `+ item` row. `hjkl` moves between cells; `Enter` toggles an
-  item×person assignment or edits the focused cell inline; the trailing `+ person`
-  column / `+ item` row open inline text entry. `App::adding_people` and
-  `adding_items` keep that entry going across Enters; `begin_edit` clears them and
-  `App::edit_prompt` labels the footer. Receipt-level fields (`m`/`D`/`t`/`S`/`T`/`%`)
-  use the footer input. Unit price is stored but not shown or edited.
+  `--clean` bypasses the load and forces a fresh extraction.
+- There is a single Grid view (screens are only `Extracting` and `Grid`), titled
+  "Receipt · merchant · date". It is a spreadsheet: item name/qty/total columns, one
+  column per person, then a `+ person` column, plus `+ item`, `Tax`, `Tip`, and
+  `Owed` rows. Below the grid are four receipt detail rows (merchant, date, subtotal,
+  receipt total) the cursor can move into. Typing starts editing the
+  highlighted cell/field (`App::focused_target`): names/date accept any sensible
+  character, numeric fields only when a digit/`.`/`-` is typed (`App::type_into_cell`).
+  `Enter` commits, `Esc` cancels, and an arrow key commits then moves
+  (`App::commit_and_move`). `Space`/`Enter` toggles an item×person assignment;
+  `d`/`Delete` requests deletion behind a confirmation (`App::confirm_delete` /
+  `DeleteTarget`). `+ person`/`+ item` add continuously across Enters. `?` opens the
+  contextual info popup. Unit price is stored but not shown or edited.
+- Undo (`u` or `Ctrl+Z`) uses an in-memory stack of `Snapshot`s (`receipt`, `people`,
+  `assignments`, `tip_bps`, cursor). `App::checkpoint` is called before every mutation
+  (`commit_edit`, `grid_toggle`, `confirm_delete_now`); `App::restore` clamps the
+  cursor. Capped at 100 snapshots. There is no redo yet.
 - The bottom of the grid shows two full-width coloured bars: a receipt check
-  (`SplitResult::total_matches`, green/red) and an allocation check (sum of each
-  person's owed vs `computed_total_cents`, green or yellow with unassigned items).
-  Keep those two error conditions distinct.
+  (`SplitResult::total_matches`, parsed items+tax vs parsed total) and an allocation
+  check (`SplitResult::owed_matches`, sum of each person's owed vs
+  `expected_charge_cents` = receipt total plus any tax/tip it excludes). Keep those
+  two error conditions distinct.
 - Receipt composition comes from the model: `total_includes_tax`,
-  `total_includes_tip`, and an optional printed `tip_cents`. Item prices are assumed
-  to exclude tax. `split::compute_split` uses these so reconciliation compares the
-  implied pre-tip amount. Keep that logic in `split.rs`.
+  `total_includes_tip`, and optional printed `tax_cents`/`tax_bps`/`tip_cents`. Item
+  prices are assumed to exclude tax. `pi.rs` derives `tax_cents` from
+  `total − subtotal` (minus any included tip) when the receipt does not itemise tax,
+  and sets `tax_bps` from it. The receipt check compares the **parsed** items +
+  parsed tax/tip to the parsed total (`SplitResult::comparable_cents`), while the
+  allocation uses the chosen rates. Keep that logic in `split.rs`.
 
 ## Testing
 

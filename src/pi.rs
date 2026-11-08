@@ -241,11 +241,11 @@ fn normalize(value: &Value) -> Result<Receipt> {
 
     let items_sum: i64 = items.iter().map(|i| i.line_total_cents).sum();
     let subtotal_cents = obj.get("subtotal").and_then(|v| value_to_cents(Some(v)));
-    let tax_cents = obj
+    let parsed_tax = obj
         .get("tax")
         .and_then(|v| value_to_cents(Some(v)))
         .unwrap_or(0);
-    let tip_cents = obj.get("tip").and_then(|v| value_to_cents(Some(v)));
+    let parsed_tip = obj.get("tip").and_then(|v| value_to_cents(Some(v)));
     let total_includes_tax = obj
         .get("total_includes_tax")
         .and_then(Value::as_bool)
@@ -257,7 +257,29 @@ fn normalize(value: &Value) -> Result<Receipt> {
     let total_cents = obj
         .get("total")
         .and_then(|v| value_to_cents(Some(v)))
-        .unwrap_or_else(|| subtotal_cents.unwrap_or(items_sum) + tax_cents);
+        .unwrap_or_else(|| subtotal_cents.unwrap_or(items_sum) + parsed_tax);
+
+    // Derive tax and tip from the printed total and subtotal when not itemised.
+    let base = subtotal_cents.unwrap_or(items_sum);
+    let mut tax_cents = parsed_tax;
+    let mut tip_cents = parsed_tip;
+    if total_includes_tax && tax_cents == 0 {
+        let included_tip = if total_includes_tip {
+            tip_cents.unwrap_or(0)
+        } else {
+            0
+        };
+        tax_cents = (total_cents - base - included_tip).max(0);
+    }
+    if total_includes_tip && tip_cents.is_none() {
+        let included_tax = if total_includes_tax { tax_cents } else { 0 };
+        tip_cents = Some((total_cents - base - included_tax).max(0));
+    }
+    let tax_bps = if base > 0 {
+        ((tax_cents as i128 * 10_000 + base as i128 / 2) / base as i128) as u32
+    } else {
+        0
+    };
 
     Ok(Receipt {
         merchant,
@@ -266,6 +288,7 @@ fn normalize(value: &Value) -> Result<Receipt> {
         items,
         subtotal_cents,
         tax_cents,
+        tax_bps,
         tip_cents,
         total_cents,
         total_includes_tax,
@@ -348,6 +371,18 @@ mod tests {
         let value = json!({"items":[{"name":"x","line_total":10}], "tax": 1});
         let receipt = normalize(&value).unwrap();
         assert_eq!(receipt.total_cents, 1100);
+    }
+
+    #[test]
+    fn derives_tax_from_total_and_subtotal() {
+        let value = json!({
+            "items": [{"name": "meal", "line_total": 20.0}],
+            "subtotal": 20.0,
+            "total": 21.65
+        });
+        let receipt = normalize(&value).unwrap();
+        assert_eq!(receipt.tax_cents, 165);
+        assert_eq!(receipt.tax_bps, 825);
     }
 
     #[test]

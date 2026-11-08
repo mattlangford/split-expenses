@@ -90,17 +90,8 @@ pub fn allocate(total: i64, weights: &[i64]) -> Vec<i64> {
     }
     let weight_sum: i128 = weights.iter().map(|&w| w.max(0) as i128).sum();
     if weight_sum == 0 {
-        // Even split, distributing the remainder to the earliest entries.
-        let base = total.div_euclid(n as i64);
-        let mut remainder = total.rem_euclid(n as i64);
-        let mut out = vec![base; n];
-        let mut i = 0;
-        while remainder > 0 {
-            out[i] += 1;
-            remainder -= 1;
-            i += 1;
-        }
-        return out;
+        // Nothing to weight by (e.g. no items assigned yet): allocate nothing.
+        return vec![0_i64; n];
     }
 
     let mut shares = vec![0_i64; n];
@@ -168,7 +159,7 @@ mod tests {
     }
 
     #[test]
-    fn allocate_zero_weights_even() {
-        assert_eq!(allocate(10, &[0, 0, 0]), vec![4, 3, 3]);
+    fn allocate_zero_weights_allocates_nothing() {
+        assert_eq!(allocate(10, &[0, 0, 0]), vec![0, 0, 0]);
     }
 }

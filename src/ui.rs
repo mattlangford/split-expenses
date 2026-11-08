@@ -2,15 +2,16 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table, Wrap};
 
-use crate::app::{App, EditTarget, ITEM_COLS, Mode, Screen, money};
+use crate::app::{App, DeleteTarget, EditTarget, ITEM_COLS, Mode, Screen, money};
 use crate::money::format_percent_bps;
+use crate::split::percent_of;
 
 pub fn render(frame: &mut Frame, app: &App) {
     let chunks = Layout::vertical([
         Constraint::Min(5),
-        Constraint::Length(5),
+        Constraint::Length(8),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -27,6 +28,8 @@ pub fn render(frame: &mut Frame, app: &App) {
         }
     }
     render_footer(frame, chunks[4], app);
+    render_help(frame, app);
+    render_confirm(frame, app);
 }
 
 fn render_extracting(frame: &mut Frame, area: Rect, app: &App) {
@@ -53,7 +56,7 @@ fn render_extracting(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(Color::Red),
         )));
         lines.push(Line::from(Span::styled(
-            "press r to retry, q to quit",
+            "press r to retry, Ctrl+C to quit",
             Style::default().fg(Color::Yellow),
         )));
     } else {
@@ -96,14 +99,10 @@ fn render_grid(frame: &mut Frame, area: Rect, app: &App) {
         return;
     };
     let people = &app.people;
+    let grid_rows = receipt.items.len() + 5;
+    let grid_focus = app.row < grid_rows;
 
-    let person_index = if app.col >= ITEM_COLS && app.col < ITEM_COLS + people.len() {
-        Some(app.col - ITEM_COLS)
-    } else {
-        None
-    };
-    let on_assignment =
-        app.row >= 1 && app.row <= receipt.items.len() && person_index.is_some();
+    let on_item_row = grid_focus && app.row >= 1 && app.row <= receipt.items.len();
 
     let mut widths = vec![
         Constraint::Min(16),
@@ -121,30 +120,30 @@ fn render_grid(frame: &mut Frame, area: Rect, app: &App) {
     let mut header = vec![
         grid_cell(
             "Item".to_string(),
-            app.row == 0 && app.col == 0,
+            grid_focus && app.row == 0 && app.col == 0,
             false,
             true,
-            false,
+            on_item_row && app.col == 0,
         ),
         grid_cell(
             "Qty".to_string(),
-            app.row == 0 && app.col == 1,
+            grid_focus && app.row == 0 && app.col == 1,
             false,
             true,
-            false,
+            on_item_row && app.col == 1,
         ),
         grid_cell(
             "Total".to_string(),
-            app.row == 0 && app.col == 2,
+            grid_focus && app.row == 0 && app.col == 2,
             false,
             true,
-            false,
+            on_item_row && app.col == 2,
         ),
     ];
     for (index, person) in people.iter().enumerate() {
-        let selected = app.row == 0 && app.col == ITEM_COLS + index;
+        let selected = grid_focus && app.row == 0 && app.col == ITEM_COLS + index;
         let editing = matches!(app.edit, Some(EditTarget::GridPersonName(i)) if i == index);
-        let crosshair = on_assignment && person_index == Some(index);
+        let crosshair = on_item_row && app.col == ITEM_COLS + index;
         let text = if editing {
             format!("{}▏", app.input)
         } else {
@@ -152,24 +151,30 @@ fn render_grid(frame: &mut Frame, area: Rect, app: &App) {
         };
         header.push(grid_cell(text, selected, editing, true, crosshair));
     }
-    let add_selected = app.row == 0 && app.col == ITEM_COLS + people.len();
+    let add_selected = grid_focus && app.row == 0 && app.col == ITEM_COLS + people.len();
     let add_editing = matches!(app.edit, Some(EditTarget::GridNewPerson));
     let add_text = if add_editing {
         format!("{}▏", app.input)
     } else {
         "+ person".to_string()
     };
-    header.push(grid_cell(add_text, add_selected, add_editing, true, false));
+    header.push(grid_cell(
+        add_text,
+        add_selected,
+        add_editing,
+        true,
+        on_item_row && app.col == ITEM_COLS + people.len(),
+    ));
     rows.push(Row::new(header));
 
     // One row per item.
     for (row_index, item) in receipt.items.iter().enumerate() {
-        let row_selected = app.row == row_index + 1;
+        let row_selected = grid_focus && app.row == row_index + 1;
         let name_editing = matches!(app.edit, Some(EditTarget::GridItemName(i)) if i == row_index);
         let qty_editing = matches!(app.edit, Some(EditTarget::GridItemQty(i)) if i == row_index);
         let total_editing =
             matches!(app.edit, Some(EditTarget::GridItemTotal(i)) if i == row_index);
-        let crosshair = on_assignment && app.row == row_index + 1;
+        let crosshair = on_item_row && app.row == row_index + 1;
 
         let name_text = if name_editing {
             format!("{}▏", app.input)
@@ -236,7 +241,7 @@ fn render_grid(frame: &mut Frame, area: Rect, app: &App) {
 
     // Add-item row.
     let add_row = receipt.items.len() + 1;
-    let add_row_selected = app.row == add_row;
+    let add_row_selected = grid_focus && app.row == add_row;
     let add_row_editing = matches!(app.edit, Some(EditTarget::GridNewItem));
     let add_row_text = if add_row_editing {
         format!("{}▏", app.input)
@@ -262,9 +267,84 @@ fn render_grid(frame: &mut Frame, area: Rect, app: &App) {
     }
     rows.push(Row::new(add_cells));
 
-    let table = Table::new(rows, widths).block(
-        Block::bordered().title(" Grid (hjkl move · Enter edit/toggle · type on + cells to add) "),
+    // Tax and Tip percentage rows.
+    let tax_row = receipt.items.len() + 2;
+    let tip_row = receipt.items.len() + 3;
+    let owed_row = receipt.items.len() + 4;
+
+    let tax_selected = grid_focus && app.row == tax_row;
+    let tax_editing = matches!(app.edit, Some(EditTarget::TaxPercent));
+    let tax_text = if tax_editing {
+        format!("{}▏", app.input)
+    } else {
+        format!("{}%", format_percent_bps(receipt.tax_bps))
+    };
+    let mut tax_cells = vec![
+        grid_cell("Tax".to_string(), tax_selected, false, true, false),
+        empty_cell(false, false),
+        grid_cell(tax_text, tax_selected, tax_editing, true, false),
+    ];
+    for _ in 0..people.len() + 1 {
+        tax_cells.push(empty_cell(false, false));
+    }
+    rows.push(Row::new(tax_cells));
+
+    let tip_selected = grid_focus && app.row == tip_row;
+    let tip_editing = matches!(app.edit, Some(EditTarget::TipPercent));
+    let tip_text = if tip_editing {
+        format!("{}▏", app.input)
+    } else {
+        format!("{}%", format_percent_bps(app.tip_bps))
+    };
+    let mut tip_cells = vec![
+        grid_cell("Tip".to_string(), tip_selected, false, true, false),
+        empty_cell(false, false),
+        grid_cell(tip_text, tip_selected, tip_editing, true, false),
+    ];
+    for _ in 0..people.len() + 1 {
+        tip_cells.push(empty_cell(false, false));
+    }
+    rows.push(Row::new(tip_cells));
+
+    // "Owed" summary row: each person's total under their column.
+    let owed_selected = grid_focus && app.row == owed_row;
+    let split = app.split_result();
+    let mut owed_cells = vec![
+        grid_cell(
+            "Owed".to_string(),
+            owed_selected && app.col == 0,
+            false,
+            true,
+            false,
+        ),
+        empty_cell(owed_selected && app.col == 1, false),
+        empty_cell(owed_selected && app.col == 2, false),
+    ];
+    for (index, _) in people.iter().enumerate() {
+        let amount = split
+            .as_ref()
+            .and_then(|s| s.shares.get(index))
+            .map(|share| money(share.total_cents()))
+            .unwrap_or_default();
+        owed_cells.push(grid_cell(
+            amount,
+            owed_selected && app.col == ITEM_COLS + index,
+            false,
+            true,
+            false,
+        ));
+    }
+    owed_cells.push(empty_cell(
+        owed_selected && app.col == ITEM_COLS + people.len(),
+        false,
+    ));
+    rows.push(Row::new(owed_cells));
+
+    let title = format!(
+        " Receipt · {} · {} ",
+        receipt.merchant, receipt.transaction_date
     );
+    let table = Table::new(rows, widths).block(Block::bordered().title(title));
     frame.render_widget(table, area);
 }
 
@@ -272,50 +352,79 @@ fn render_details(frame: &mut Frame, area: Rect, app: &App) {
     let Some(receipt) = &app.receipt else {
         return;
     };
-    let mut lines = vec![
-        Line::from(format!(
-            "Merchant: {}    Date: {}    Tip: {}%",
-            receipt.merchant,
-            receipt.transaction_date,
-            format_percent_bps(app.tip_bps),
-        )),
-        Line::from(format!(
-            "Tax: {}    Subtotal: {}    Receipt total: {}   (tax {}, tip {})",
-            money(receipt.tax_cents),
+    let focus = app.detail_focus();
+
+    let field = |index: usize, label: &str, target: EditTarget, value: String| -> Line<'static> {
+        let editing = app.edit.as_ref() == Some(&target);
+        let focused = focus == Some(index);
+        let text = if editing {
+            format!("{label:<14}{}▏", app.input)
+        } else {
+            format!("{label:<14}{value}")
+        };
+        let style = if editing {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else if focused {
+            Style::default()
+                .bg(Color::Cyan)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        Line::from(Span::styled(text, style))
+    };
+
+    let items_sum: i64 = receipt.items.iter().map(|item| item.line_total_cents).sum();
+    let subtotal = receipt.subtotal_cents.unwrap_or(items_sum);
+    let lines = vec![
+        field(
+            0,
+            "Merchant",
+            EditTarget::Merchant,
+            receipt.merchant.clone(),
+        ),
+        field(
+            1,
+            "Date",
+            EditTarget::Date,
+            receipt.transaction_date.to_string(),
+        ),
+        field(
+            2,
+            "Subtotal",
+            EditTarget::Subtotal,
             receipt
                 .subtotal_cents
                 .map(money)
-                .unwrap_or_else(|| "—".to_string()),
-            money(receipt.total_cents),
-            if receipt.total_includes_tax {
-                "included"
-            } else {
-                "excluded"
-            },
-            if receipt.total_includes_tip {
-                "included"
-            } else {
-                "excluded"
-            },
-        )),
+                .unwrap_or_else(|| money(items_sum)),
+        ),
+        field(
+            3,
+            "Tax",
+            EditTarget::TaxPercent,
+            format!(
+                "{} ({}%)",
+                money(percent_of(subtotal, receipt.tax_bps)),
+                format_percent_bps(receipt.tax_bps)
+            ),
+        ),
+        field(4, "Total", EditTarget::Total, money(receipt.total_cents)),
+        field(
+            5,
+            "Tip",
+            EditTarget::TipPercent,
+            format!(
+                "{} ({}%)",
+                money(percent_of(subtotal, app.tip_bps)),
+                format_percent_bps(app.tip_bps)
+            ),
+        ),
     ];
-    if let Some(split) = app.split_result() {
-        let owed: Vec<String> = split
-            .shares
-            .iter()
-            .map(|share| format!("{} {}", share.name, money(share.total_cents())))
-            .collect();
-        if !owed.is_empty() {
-            lines.push(Line::from(format!("Owed: {}", owed.join("   "))));
-        }
-    }
-    lines.push(Line::from(Span::styled(
-        "keys: hjkl move · Enter edit/toggle · a add person · d delete · m merchant · D date · t tax · S subtotal · T total · % tip · s save",
-        Style::default().fg(Color::DarkGray),
-    )));
+
     frame.render_widget(
         Paragraph::new(lines)
-            .block(Block::bordered().title(" Details "))
+            .block(Block::bordered().title(" Receipt "))
             .wrap(Wrap { trim: true }),
         area,
     );
@@ -356,39 +465,43 @@ fn render_owed_banner(frame: &mut Frame, area: Rect, app: &App) {
     let Some(split) = app.split_result() else {
         return;
     };
-    let owed: i64 = split.shares.iter().map(|share| share.total_cents()).sum();
-    let target = split.computed_total_cents;
-
     if split.shares.is_empty() {
         render_bar(
             frame,
             area,
-            "⚠ no people yet — put the cursor on + person and press Enter",
+            "⚠ no people yet — move to + person and type a name",
             Color::Yellow,
             Color::Black,
         );
         return;
     }
 
-    let complete = split.unassigned.is_empty() && owed == target;
-    if complete {
-        render_bar(
-            frame,
-            area,
-            &format!("✓ everyone's shares sum to {}", money(target)),
-            Color::Green,
-            Color::Black,
-        );
-    } else {
-        let delta = target - owed;
+    if split.owed_matches {
         render_bar(
             frame,
             area,
             &format!(
-                "⚠ owed {} of {}   ·   {} item(s) unassigned   (Δ {})",
-                money(owed),
-                money(target),
-                split.unassigned.len(),
+                "✓ everyone's shares sum to the total {}",
+                money(split.expected_charge_cents)
+            ),
+            Color::Green,
+            Color::Black,
+        );
+    } else {
+        let delta = split.expected_charge_cents - split.owed_cents;
+        let unassigned = if split.unassigned.is_empty() {
+            String::new()
+        } else {
+            format!("   ·   {} item(s) unassigned", split.unassigned.len())
+        };
+        render_bar(
+            frame,
+            area,
+            &format!(
+                "⚠ owed {} of {}{}   (Δ {})",
+                money(split.owed_cents),
+                money(split.expected_charge_cents),
+                unassigned,
                 money(delta)
             ),
             Color::Yellow,
@@ -431,9 +544,9 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         ])
     } else {
         let hints = match app.screen {
-            Screen::Extracting => "r retry · q quit",
+            Screen::Extracting => "r retry · Ctrl+C quit",
             Screen::Grid => {
-                "hjkl move · Enter edit/toggle · Space toggle · a add person · d delete · s save · q quit"
+                "? help · arrows move · type to edit · Space toggle · d delete · u undo · Ctrl+S save · Ctrl+C quit"
             }
         };
         let status = if app.status.is_empty() {
@@ -447,6 +560,64 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         ])
     };
     frame.render_widget(Paragraph::new(line), area);
+}
+
+fn render_help(frame: &mut Frame, app: &App) {
+    let Some(text) = &app.help else {
+        return;
+    };
+    let screen = frame.area();
+    let width = screen.width.saturating_sub(4).clamp(24, 72);
+    let lines = text.lines().count() as u16;
+    let height = (lines + 2).clamp(3, screen.height.saturating_sub(2).max(3));
+    let x = screen.x + screen.width.saturating_sub(width) / 2;
+    let y = screen.y + screen.height.saturating_sub(height) / 2;
+    let popup = Rect::new(x, y, width, height);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(text.clone())
+            .block(Block::bordered().title(" Info · any key to close "))
+            .wrap(Wrap { trim: true }),
+        popup,
+    );
+}
+
+fn render_confirm(frame: &mut Frame, app: &App) {
+    let Some(target) = &app.confirm_delete else {
+        return;
+    };
+    let label = match target {
+        DeleteTarget::Item(index) => app
+            .receipt
+            .as_ref()
+            .and_then(|receipt| receipt.items.get(*index))
+            .map(|item| format!("item \"{}\"", item.name))
+            .unwrap_or_else(|| "this item".to_string()),
+        DeleteTarget::Person(index) => app
+            .people
+            .get(*index)
+            .map(|person| format!("person \"{}\"", person.name))
+            .unwrap_or_else(|| "this person".to_string()),
+    };
+    let text = format!("Delete {label}?\n\nThis removes it from the split.\n\ny = yes    n / Esc = no");
+
+    let screen = frame.area();
+    let width = screen.width.saturating_sub(4).clamp(28, 60);
+    let height = 6u16.clamp(3, screen.height.saturating_sub(2).max(3));
+    let x = screen.x + screen.width.saturating_sub(width) / 2;
+    let y = screen.y + screen.height.saturating_sub(height) / 2;
+    let popup = Rect::new(x, y, width, height);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(text)
+            .block(
+                Block::bordered()
+                    .title(" Confirm ")
+                    .style(Style::default().fg(Color::Yellow)),
+            )
+            .wrap(Wrap { trim: true }),
+        popup,
+    );
 }
 
 fn grid_cell(
